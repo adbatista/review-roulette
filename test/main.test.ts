@@ -36,9 +36,7 @@ import { main } from "../src/main";
 beforeEach(() => {
   vi.clearAllMocks();
   doubles.run.mockResolvedValue({
-    reviewer: "Alice",
-    reviewCount: 3,
-    workload: 3,
+    picks: [{ reviewer: "Alice", reviewCount: 3, workload: 3 }],
     assigned: false,
   });
 });
@@ -54,6 +52,7 @@ it.each(["pull_request", "pull_request_target"])(
     });
     expect(doubles.setOutput.mock.calls).toEqual([
       ["reviewer", "Alice"],
+      ["reviewers", "Alice"],
       ["review-count", 3],
       ["issue-load", ""],
       ["workload", 3],
@@ -66,10 +65,7 @@ it("passes issue workload inputs through and publishes the issue load", async ()
   doubles.inputs["issue-repositories"] = "acme/tasks";
   doubles.inputs["status-weights"] = "Done: 0";
   doubles.run.mockResolvedValue({
-    reviewer: "Alice",
-    reviewCount: 3,
-    issueLoad: 2,
-    workload: 5,
+    picks: [{ reviewer: "Alice", reviewCount: 3, issueLoad: 2, workload: 5 }],
     assigned: false,
   });
   await main();
@@ -82,6 +78,28 @@ it("passes issue workload inputs through and publishes the issue load", async ()
   });
   expect(doubles.setOutput).toHaveBeenCalledWith("issue-load", 2);
   expect(doubles.setOutput).toHaveBeenCalledWith("workload", 5);
+});
+it("passes project inputs through and lists every unique pick", async () => {
+  doubles.inputs.projects = "web | packages/web/** | alice";
+  doubles.inputs.codeowners = "true";
+  doubles.run.mockResolvedValue({
+    picks: [
+      { reviewer: "Alice", reviewCount: 1, workload: 1 },
+      { reviewer: "Bob", reviewCount: 0, workload: 0 },
+      { reviewer: "Alice", reviewCount: 1, workload: 1 },
+    ],
+    assigned: true,
+  });
+  await main();
+  delete doubles.inputs.projects;
+  delete doubles.inputs.codeowners;
+  expect(doubles.run.mock.calls.at(-1)?.[0]).toMatchObject({
+    projects: [{ name: "web", patterns: [{ glob: "packages/web/**" }], owners: ["alice"] }],
+    codeowners: true,
+  });
+  expect(doubles.setOutput).toHaveBeenCalledWith("reviewer", "Alice");
+  expect(doubles.setOutput).toHaveBeenCalledWith("reviewers", "Alice,Bob");
+  expect(doubles.setOutput).toHaveBeenCalledWith("assigned", true);
 });
 it("fails before API work without PR context", async () => {
   const payload = doubles.context.payload;

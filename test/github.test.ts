@@ -285,7 +285,13 @@ describe("workloads", () => {
 describe("REST integration", () => {
   it("reads PR author and paginates all outstanding requested users", async () => {
     const { api, calls } = harness([
-      { body: { user: { login: "author" } } },
+      {
+        body: {
+          user: { login: "author" },
+          labels: [{ name: "web" }, { name: "bug" }],
+          base: { ref: "release" },
+        },
+      },
       {
         body: { users: [{ login: "Alice" }], teams: [] },
         headers: {
@@ -297,8 +303,58 @@ describe("REST integration", () => {
     expect(await api.getPull(target)).toEqual({
       author: "author",
       requestedReviewers: ["Alice", "Bob"],
+      labels: ["web", "bug"],
+      baseRef: "release",
     });
     expect(calls).toHaveLength(3);
+  });
+  it("paginates changed files", async () => {
+    const { api, calls } = harness([
+      {
+        body: [{ filename: "src/a.ts" }],
+        headers: {
+          link: '<https://api.github.com/repos/acme/project/pulls/7/files?page=2>; rel="next"',
+        },
+      },
+      { body: [{ filename: "docs/b.md" }] },
+    ]);
+    expect(await api.listFiles(target)).toEqual(["src/a.ts", "docs/b.md"]);
+    expect(new URL(calls[0].url).pathname).toBe("/repos/acme/project/pulls/7/files");
+  });
+  it("reads CODEOWNERS from the base ref, trying each supported location", async () => {
+    const { api, calls } = harness([
+      { status: 404, body: { message: "Not Found" } },
+      { body: { type: "file", content: Buffer.from("* @alice\n").toString("base64") } },
+    ]);
+    expect(await api.getCodeowners(target, "release")).toBe("* @alice\n");
+    expect(calls.map((call) => new URL(call.url).pathname)).toEqual([
+      "/repos/acme/project/contents/.github%2FCODEOWNERS",
+      "/repos/acme/project/contents/CODEOWNERS",
+    ]);
+    expect(new URL(calls[0].url).searchParams.get("ref")).toBe("release");
+  });
+  it("returns no CODEOWNERS when none exists or the path is a directory", async () => {
+    const { api } = harness([
+      { body: [{ type: "file", name: "nested" }] },
+      { status: 404, body: {} },
+      { status: 404, body: {} },
+    ]);
+    expect(await api.getCodeowners(target, "main")).toBeUndefined();
+  });
+  it("propagates CODEOWNERS read failures other than not-found", async () => {
+    const { api } = harness([{ status: 403, body: { message: "denied" } }]);
+    await expect(api.getCodeowners(target, "main")).rejects.toThrow();
+  });
+  it("lists team members and explains an unreadable team", async () => {
+    const { api, calls } = harness([
+      { body: [{ login: "Alice" }, { login: "Bob" }] },
+      { status: 404, body: { message: "Not Found" } },
+      { status: 403, body: { message: "denied" } },
+    ]);
+    expect(await api.getTeamMembers("acme", "web")).toEqual(["Alice", "Bob"]);
+    expect(new URL(calls[0].url).pathname).toBe("/orgs/acme/teams/web/members");
+    await expect(api.getTeamMembers("acme", "hidden")).rejects.toThrow(/team is inaccessible/);
+    await expect(api.getTeamMembers("acme", "web")).rejects.toThrow(/denied/);
   });
   it("paginates comments including identity metadata", async () => {
     const { api, calls } = harness([

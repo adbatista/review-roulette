@@ -37,13 +37,17 @@ export async function main(): Promise<void> {
       "issue-repositories": core.getInput("issue-repositories"),
       "status-field": core.getInput("status-field"),
       "status-weights": core.getInput("status-weights"),
+      projects: core.getInput("projects"),
+      codeowners: core.getInput("codeowners"),
     });
     const target = targetFromPayload();
     const result = await run(options, target, new GitHubClient(token));
-    core.setOutput("reviewer", result.reviewer);
-    core.setOutput("review-count", result.reviewCount);
-    core.setOutput("issue-load", result.issueLoad ?? "");
-    core.setOutput("workload", result.workload);
+    const [first] = result.picks;
+    core.setOutput("reviewer", first.reviewer);
+    core.setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
+    core.setOutput("review-count", first.reviewCount);
+    core.setOutput("issue-load", first.issueLoad ?? "");
+    core.setOutput("workload", first.workload);
     core.setOutput("assigned", result.assigned);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Review roulette failed";

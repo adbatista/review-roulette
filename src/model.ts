@@ -8,6 +8,17 @@ export interface Options {
   issueRepositories: string[];
   statusField: string;
   statusWeights: Map<string, number>;
+  projects: Project[];
+  codeowners: boolean;
+}
+export interface Project {
+  name: string;
+  patterns: { repository?: string; glob: string }[];
+  owners: string[];
+}
+export interface Category {
+  name: string;
+  candidates: string[];
 }
 export interface Target {
   owner: string;
@@ -17,6 +28,8 @@ export interface Target {
 export interface PullSnapshot {
   author: string;
   requestedReviewers: string[];
+  labels: string[];
+  baseRef: string;
 }
 export interface Selection {
   reviewer: string;
@@ -27,7 +40,14 @@ export interface Suggestion extends Selection {
   issueLoad?: number;
 }
 export type AssignmentStatus = "suggested" | "requested" | "already-requested";
-export type RunResult = Suggestion & { assigned: boolean };
+export interface ReviewerPick extends Suggestion {
+  category: string;
+  status: AssignmentStatus;
+}
+export interface RunResult {
+  picks: ReviewerPick[];
+  assigned: boolean;
+}
 export interface ManagedComment {
   id: number;
   body: string;

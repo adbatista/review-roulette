@@ -27,9 +27,17 @@ inputs:
   status-weights:
     description: "One `Status name: weight` per line; `*` sets the weight of any other or missing status (default 1). Empty counts every assigned issue as 1 without reading projects."
     default: ""
+  projects:
+    description: "One `name | patterns | owners` per line. Patterns are comma-separated globs, optionally `owner/repo:glob`. A project matches a PR that changes a matching file or carries a label equal to its name; each matched project gets its own pick."
+    default: ""
+  codeowners:
+    description: Also pick among the CODEOWNERS of the changed files.
+    default: "false"
 outputs:
   reviewer:
-    description: Selected reviewer login.
+    description: Selected reviewer login; the first category's pick when several are made.
+  reviewers:
+    description: Comma-separated unique logins selected across all categories.
   review-count:
     description: Outstanding review requests at selection time, before any new request.
   issue-load:

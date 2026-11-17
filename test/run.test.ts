@@ -1,7 +1,7 @@
 import { expect, it } from "vite-plus/test";
 import { run } from "../src/run";
 import { renderComment } from "../src/comment";
-import type { GitHubApi, Options, ManagedComment } from "../src/model";
+import type { GitHubApi, Options, ManagedComment, ReviewerPick } from "../src/model";
 const options: Options = {
   token: "fake",
   reviewers: ["Author", "Alice", "Bob"],
@@ -10,7 +10,16 @@ const options: Options = {
   issueRepositories: [],
   statusField: "Status",
   statusWeights: new Map(),
+  projects: [],
+  codeowners: false,
 };
+const pick = (reviewer: string, reviewCount: number, category = "All"): ReviewerPick => ({
+  reviewer,
+  reviewCount,
+  workload: reviewCount,
+  category,
+  status: "suggested",
+});
 const target = { owner: "acme", repo: "project", pullNumber: 7 };
 function fixture(
   settings: {
@@ -21,6 +30,10 @@ function fixture(
     counts?: Map<string, number>;
     suggested?: string[];
     issueLoads?: Map<string, number>;
+    files?: string[];
+    labels?: string[];
+    codeowners?: string;
+    teams?: Record<string, string[]>;
   } = {},
 ) {
   const events: string[] = [];
@@ -37,7 +50,24 @@ function fixture(
     },
     async getPull() {
       step("pull");
-      return { author: settings.author ?? "author", requestedReviewers: settings.requested ?? [] };
+      return {
+        author: settings.author ?? "author",
+        requestedReviewers: settings.requested ?? [],
+        labels: settings.labels ?? [],
+        baseRef: "main",
+      };
+    },
+    async listFiles() {
+      step("files");
+      return settings.files ?? [];
+    },
+    async getCodeowners(_target, ref) {
+      step("codeowners:" + ref);
+      return settings.codeowners;
+    },
+    async getTeamMembers(organization, team) {
+      step(`team:${organization}/${team}`);
+      return settings.teams?.[team] ?? [];
     },
     async getSuggestedReviewers() {
       step("suggestions");
@@ -79,7 +109,7 @@ function fixture(
 it("checks access first, excludes author before counting and creates suggestion without requesting", async () => {
   const f = fixture();
   const result = await run(options, target, f.api, () => 0);
-  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, workload: 1, assigned: false });
+  expect(result).toEqual({ picks: [pick("Alice", 1)], assigned: false });
   expect(f.events.slice(0, 3)).toEqual(["access", "pull", "counts"]);
   expect(f.counted).toEqual([["Alice", "Bob"]]);
   expect(f.events).not.toContain("request:Alice");
@@ -109,10 +139,7 @@ it("adds assigned issue load to review requests before selecting", async () => {
     () => 0,
   );
   expect(result).toEqual({
-    reviewer: "Bob",
-    reviewCount: 2,
-    issueLoad: 1,
-    workload: 3,
+    picks: [{ ...pick("Bob", 2), issueLoad: 1, workload: 3 }],
     assigned: false,
   });
   expect(f.events).toContain("issues:acme/tasks+other:Stage:1");
@@ -121,7 +148,7 @@ it("adds assigned issue load to review requests before selecting", async () => {
 it("balances native suggestions when no reviewer list is supplied", async () => {
   const f = fixture();
   const result = await run({ ...options, reviewers: [] }, target, f.api, () => 0);
-  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, workload: 1, assigned: false });
+  expect(result).toEqual({ picks: [pick("Alice", 1)], assigned: false });
   expect(f.counted).toEqual([["Alice", "Bob"]]);
   expect(f.events.slice(0, 4)).toEqual(["access", "pull", "suggestions", "counts"]);
 });
@@ -159,12 +186,12 @@ it("retains and updates an owned assigned suggestion even above minimum", async 
         id: 42,
         authorLogin: "bot",
         authorType: "Bot",
-        body: renderComment({ reviewer: "Bob", reviewCount: 0, workload: 0 }, "requested"),
+        body: renderComment([{ ...pick("Bob", 0), status: "requested" }]),
       },
     ],
   });
   const result = await run({ ...options, assignReviewer: true }, target, f.api, () => 0);
-  expect(result.reviewer).toBe("Bob");
+  expect(result.picks[0].reviewer).toBe("Bob");
   expect(f.events.at(-1)).toBe("update:42");
   expect(f.events).not.toContain("request:Bob");
 });
@@ -196,3 +223,99 @@ it("reports comment failure after assignment; rerun skips already requested revi
   expect(next.events).not.toContain("request:Alice");
   expect(next.published[0]).toContain("Review already requested");
 });
+const web = { name: "web", patterns: [{ glob: "packages/web" }], owners: ["Alice", "Carol"] };
+const api = { name: "api", patterns: [{ glob: "services/api" }], owners: ["Bob", "author"] };
+const everyone = new Map([
+  ["alice", 1],
+  ["bob", 2],
+  ["carol", 0],
+  ["dave", 3],
+]);
+it("picks one owner per matched project and counts every candidate once", async () => {
+  const f = fixture({
+    files: ["packages/web/a.ts", "services/api/main.go"],
+    counts: everyone,
+  });
+  const result = await run({ ...options, projects: [web, api] }, target, f.api, () => 0);
+  expect(result.picks).toEqual([pick("Carol", 0, "web"), pick("Bob", 2, "api")]);
+  expect(f.counted).toEqual([["Alice", "Carol", "Bob"]]);
+  expect(f.events).not.toContain("suggestions");
+  expect(f.published[0]).toContain("| web | [@Carol]");
+  expect(f.published[0]).toContain("| api | [@Bob]");
+});
+it("matches a project by label and requests each distinct pick once", async () => {
+  const shared = { name: "shared", patterns: [], owners: ["Carol"] };
+  const f = fixture({ files: ["packages/web/a.ts"], labels: ["Shared"], counts: everyone });
+  const result = await run(
+    { ...options, projects: [web, shared, api], assignReviewer: true },
+    target,
+    f.api,
+    () => 0,
+  );
+  expect(result.picks.map((entry) => [entry.category, entry.reviewer, entry.status])).toEqual([
+    ["web", "Carol", "requested"],
+    ["shared", "Carol", "requested"],
+  ]);
+  expect(result.assigned).toBe(true);
+  expect(f.events.filter((event) => event.startsWith("request:"))).toEqual(["request:Carol"]);
+});
+it("keeps each category's previous pick from the managed comment", async () => {
+  const f = fixture({
+    files: ["packages/web/a.ts", "services/api/main.go"],
+    requested: ["Alice"],
+    counts: everyone,
+    comments: [
+      {
+        id: 9,
+        authorLogin: "bot",
+        authorType: "Bot",
+        body: renderComment([pick("Alice", 0, "web"), pick("Carol", 0, "api")]),
+      },
+    ],
+  });
+  const result = await run({ ...options, projects: [web, api] }, target, f.api, () => 0);
+  expect(result.picks.map((entry) => [entry.reviewer, entry.status])).toEqual([
+    ["Alice", "already-requested"],
+    ["Bob", "suggested"],
+  ]);
+  expect(f.events.at(-1)).toBe("update:9");
+});
+it("falls back to the reviewer list when no project matches or only the author owns it", async () => {
+  const solo = { name: "solo", patterns: [{ glob: "**" }], owners: ["author"] };
+  const f = fixture({ files: ["README.md"] });
+  const result = await run({ ...options, projects: [web, solo] }, target, f.api, () => 0);
+  expect(result.picks).toEqual([pick("Alice", 1)]);
+});
+it("adds a code owners category from the base ref and expands teams", async () => {
+  const f = fixture({
+    files: ["packages/web/a.ts", "docs/a.md"],
+    codeowners: "* @dave\n/packages/ @acme/web-team @Author\n",
+    teams: { "web-team": ["Carol", "alice", "CAROL"] },
+    counts: everyone,
+  });
+  const result = await run(
+    { ...options, projects: [web], codeowners: true },
+    target,
+    f.api,
+    () => 0.99,
+  );
+  expect(result.picks).toEqual([pick("Carol", 0, "web"), pick("Carol", 0, "Code owners")]);
+  expect(f.events).toContain("codeowners:main");
+  expect(f.events).toContain("team:acme/web-team");
+  expect(f.counted).toEqual([["Alice", "Carol", "dave"]]);
+});
+it("falls back when the repository has no CODEOWNERS file", async () => {
+  const f = fixture({ files: ["a.ts"] });
+  const result = await run({ ...options, codeowners: true }, target, f.api, () => 0);
+  expect(result.picks).toEqual([pick("Alice", 1)]);
+});
+it.each(["files", "codeowners:main", "team:acme/web"])(
+  "propagates %s failure without publishing",
+  async (fail) => {
+    const f = fixture({ fail, files: ["a.ts"], codeowners: "* @acme/web" });
+    await expect(run({ ...options, codeowners: true }, target, f.api, () => 0)).rejects.toThrow(
+      fail + " failed",
+    );
+    expect(f.published).toEqual([]);
+  },
+);

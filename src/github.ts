@@ -1,4 +1,5 @@
 import { getOctokit } from "@actions/github";
+import { unique } from "./inputs";
 import type { Target } from "./model";
 
 interface Runtime {
@@ -22,12 +23,6 @@ interface IssuePage {
       } | null)[]
     | null;
 }
-
-const unique = (values: string[]) =>
-  values.filter(
-    (value, index) =>
-      values.findIndex((other) => other.toLowerCase() === value.toLowerCase()) === index,
-  );
 
 export class GitHubClient {
   private readonly octokit: ReturnType<typeof getOctokit>;
@@ -111,7 +106,54 @@ export class GitHubClient {
       requestedReviewers.push(...response.data.users.map((user) => user.login));
       if (!response.headers.link?.includes('rel="next"')) break;
     }
-    return { author: pull.data.user.login, requestedReviewers };
+    return {
+      author: pull.data.user.login,
+      requestedReviewers,
+      labels: pull.data.labels.map((label) => label.name),
+      baseRef: pull.data.base.ref,
+    };
+  }
+
+  public async listFiles(target: Target) {
+    const files = await this.retry(() =>
+      this.octokit.paginate(this.octokit.rest.pulls.listFiles, {
+        ...this.params(target),
+        pull_number: target.pullNumber,
+        per_page: 100,
+      }),
+    );
+    return files.map((file) => file.filename);
+  }
+
+  public async getCodeowners(target: Target, ref: string) {
+    for (const path of [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]) {
+      try {
+        const response = await this.retry(() =>
+          this.octokit.rest.repos.getContent({ ...this.params(target), path, ref }),
+        );
+        if (!Array.isArray(response.data) && response.data.type === "file")
+          return Buffer.from(response.data.content, "base64").toString("utf8");
+      } catch (error) {
+        if ((error as ApiFailure).status !== 404) throw error;
+      }
+    }
+    return undefined;
+  }
+
+  public async getTeamMembers(organization: string, team: string) {
+    try {
+      const members = await this.retry(() =>
+        this.octokit.paginate(this.octokit.rest.teams.listMembersInOrg, {
+          org: organization,
+          team_slug: team,
+          per_page: 100,
+        }),
+      );
+      return members.map((member) => member.login);
+    } catch (error) {
+      if ((error as ApiFailure).status !== 404) throw error;
+      throw new Error("A CODEOWNERS team is inaccessible; the token needs to read its members");
+    }
   }
 
   public async getSuggestedReviewers(target: Target) {

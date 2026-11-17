@@ -20064,6 +20064,7 @@ function getOctokit(token, options, ...additionalPlugins) {
 // src/inputs.ts
 const repositoryPattern = /^[\w.-]+$/;
 const loginPattern = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
+const unique = (values) => values.filter((value, index) => values.findIndex((other) => other.toLowerCase() === value.toLowerCase()) === index);
 function parseList(value, reviewer) {
 	const unique = /* @__PURE__ */ new Map();
 	for (const entry of value.split(/[,\n]/)) {
@@ -20097,24 +20098,54 @@ function parseWeights(value) {
 	}
 	return weights;
 }
+function parseBoolean(raw, name) {
+	const value = raw[name]?.trim() || "false";
+	if (value !== "true" && value !== "false") throw new Error(`${name} must be true or false`);
+	return value === "true";
+}
+function parseProjects(value) {
+	const projects = /* @__PURE__ */ new Map();
+	for (const line of value.split("\n")) {
+		if (!line.trim()) continue;
+		const [name, patterns, owners, ...rest] = line.split("|").map((part) => part.trim());
+		const key = name.toLowerCase();
+		if (!name || owners === void 0 || rest.length) throw new Error("projects lines must look like `name | patterns | owners`");
+		if (projects.has(key) || key === "all" || key === "code owners") throw new Error("projects names must be unique and not `All` or `Code owners`");
+		const project = {
+			name,
+			patterns: patterns.split(",").map((pattern) => pattern.trim()).filter(Boolean).map((pattern) => {
+				const scoped = /^([^/:]+\/[^/:]+):(.*)$/.exec(pattern);
+				if (!scoped) return { glob: pattern };
+				const [owner, repo] = scoped[1].split("/");
+				if (!loginPattern.test(owner) || !repositoryPattern.test(repo)) throw new Error("projects repository patterns must look like `owner/repo:glob`");
+				return {
+					repository: scoped[1],
+					glob: scoped[2].trim() || "**"
+				};
+			}),
+			owners: parseList(owners, true)
+		};
+		if (!project.owners.length) throw new Error("projects lines need at least one owner");
+		projects.set(key, project);
+	}
+	return [...projects.values()];
+}
 function parseOptions(raw) {
 	const token = (raw.token ?? "").trim();
 	if (!token) throw new Error("token is required");
-	const reviewers = parseList(raw.reviewers ?? "", true);
-	const assignment = raw["assign-reviewer"]?.trim() || "false";
-	if (assignment !== "true" && assignment !== "false") throw new Error("assign-reviewer must be true or false");
 	return {
 		token,
-		reviewers,
+		reviewers: parseList(raw.reviewers ?? "", true),
 		organizations: parseList(raw.organizations ?? "", false),
-		assignReviewer: assignment === "true",
+		assignReviewer: parseBoolean(raw, "assign-reviewer"),
 		issueRepositories: parseScopes(raw["issue-repositories"] ?? ""),
 		statusField: raw["status-field"]?.trim() || "Status",
-		statusWeights: parseWeights(raw["status-weights"] ?? "")
+		statusWeights: parseWeights(raw["status-weights"] ?? ""),
+		projects: parseProjects(raw.projects ?? ""),
+		codeowners: parseBoolean(raw, "codeowners")
 	};
 }
 // src/github.ts
-const unique = (values) => values.filter((value, index) => values.findIndex((other) => other.toLowerCase() === value.toLowerCase()) === index);
 var GitHubClient = class {
 	octokit;
 	sleep;
@@ -20164,8 +20195,45 @@ var GitHubClient = class {
 		}
 		return {
 			author: pull.data.user.login,
-			requestedReviewers
+			requestedReviewers,
+			labels: pull.data.labels.map((label) => label.name),
+			baseRef: pull.data.base.ref
 		};
+	}
+	async listFiles(target) {
+		return (await this.retry(() => this.octokit.paginate(this.octokit.rest.pulls.listFiles, {
+			...this.params(target),
+			pull_number: target.pullNumber,
+			per_page: 100
+		}))).map((file) => file.filename);
+	}
+	async getCodeowners(target, ref) {
+		for (const path of [
+			".github/CODEOWNERS",
+			"CODEOWNERS",
+			"docs/CODEOWNERS"
+		]) try {
+			const response = await this.retry(() => this.octokit.rest.repos.getContent({
+				...this.params(target),
+				path,
+				ref
+			}));
+			if (!Array.isArray(response.data) && response.data.type === "file") return Buffer.from(response.data.content, "base64").toString("utf8");
+		} catch (error) {
+			if (error.status !== 404) throw error;
+		}
+	}
+	async getTeamMembers(organization, team) {
+		try {
+			return (await this.retry(() => this.octokit.paginate(this.octokit.rest.teams.listMembersInOrg, {
+				org: organization,
+				team_slug: team,
+				per_page: 100
+			}))).map((member) => member.login);
+		} catch (error) {
+			if (error.status !== 404) throw error;
+			throw new Error("A CODEOWNERS team is inaccessible; the token needs to read its members");
+		}
 	}
 	async getSuggestedReviewers(target) {
 		const suggestions = (await this.retry(() => this.octokit.graphql("query($owner: String!, $repo: String!, $number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $number) { suggestedReviewers { reviewer { login } } } } }", {
@@ -20287,33 +20355,95 @@ var GitHubClient = class {
 	}
 };
 // src/comment.ts
+const statusCopy = {
+	suggested: "Suggestion only",
+	requested: "Review requested",
+	"already-requested": "Review already requested"
+};
 function describeWorkload(suggestion) {
 	const reviews = `${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"}`;
 	return suggestion.issueLoad === void 0 ? reviews : `${reviews}, assigned issue load ${suggestion.issueLoad}`;
 }
-function renderComment(suggestion, status) {
+function renderComment(picks) {
+	const rows = picks.map((pick) => `| ${pick.category} | [@${pick.reviewer}](https://github.com/${pick.reviewer}) — ${describeWorkload(pick)} | ${statusCopy[pick.status]} |`);
+	const marker = picks.map((pick) => `${encodeURIComponent(pick.category)}=${pick.reviewer}`).join("&");
 	return `### Review roulette
 
-| Category | Suggested reviewer |
-| --- | --- |
-| All | [@${suggestion.reviewer}](https://github.com/${suggestion.reviewer}) — ${describeWorkload(suggestion)} |
+| Category | Suggested reviewer | Status |
+| --- | --- | --- |
+${rows.join("\n")}
 
-${{
-		suggested: "Suggestion only; no review request was created.",
-		requested: "Review requested.",
-		"already-requested": "Review already requested; no additional request was created."
-	}[status]}
-
-<!-- review-roulette:v1:${suggestion.reviewer} -->`;
+<!-- review-roulette:v2:${marker} -->`;
 }
-function readSuggestion(body) {
-	const matches = [...body.matchAll(/<!-- review-roulette:v1:([^\n]*?) -->/g)];
+function readSuggestions(body) {
+	const matches = [...body.matchAll(/<!-- review-roulette:v([12]):([^\n]*?) -->/g)];
 	if (matches.length !== 1) return void 0;
-	const login = matches[0][1];
-	return loginPattern.test(login) ? login : void 0;
+	const [, version, payload] = matches[0];
+	const pairs = version === "1" ? [`All=${payload}`] : payload.split("&");
+	const suggestions = /* @__PURE__ */ new Map();
+	for (const pair of pairs) {
+		const split = pair.indexOf("=");
+		const login = pair.slice(split + 1);
+		if (split < 1 || !loginPattern.test(login)) return void 0;
+		try {
+			suggestions.set(decodeURIComponent(pair.slice(0, split)).toLowerCase(), login);
+		} catch {
+			return;
+		}
+	}
+	return suggestions;
 }
 function findManagedComment(comments, identity) {
-	return comments.filter((comment) => comment.authorLogin.toLowerCase() === identity.login.toLowerCase() && (comment.authorType === "User" || comment.authorType === "Bot") && (identity.appId === void 0 || comment.authorType === "Bot" && comment.appId === identity.appId) && readSuggestion(comment.body) !== void 0).sort((a, b) => a.id - b.id)[0];
+	return comments.filter((comment) => comment.authorLogin.toLowerCase() === identity.login.toLowerCase() && (comment.authorType === "User" || comment.authorType === "Bot") && (identity.appId === void 0 || comment.authorType === "Bot" && comment.appId === identity.appId) && readSuggestions(comment.body) !== void 0).sort((a, b) => a.id - b.id)[0];
+}
+// src/glob.ts
+function translate(glob) {
+	let out = "";
+	for (let i = 0; i < glob.length; i++) {
+		const char = glob[i];
+		if (char === "*" && glob[i + 1] === "*") {
+			i++;
+			if (glob[i + 1] === "/") {
+				i++;
+				out += "(?:.*/)?";
+			} else out += ".*";
+		} else if (char === "*") out += "[^/]*";
+		else if (char === "?") out += "[^/]";
+		else out += char.replace(/[\\^$.|+()[\]{}]/g, "\\$&");
+	}
+	return out;
+}
+function pathMatcher(pattern, codeowners = false) {
+	const directory = pattern.endsWith("/");
+	const trimmed = pattern.replace(/^\.\//, "").replace(/\/+$/, "");
+	const floating = codeowners && !trimmed.includes("/");
+	const glob = trimmed.replace(/^\/+/, "");
+	const shallow = codeowners && glob.slice(glob.lastIndexOf("/") + 1).includes("*");
+	const suffix = directory ? "/.*" : shallow ? "" : "(?:/.*)?";
+	const regex = new RegExp(`^${floating ? "(?:.*/)?" : ""}${translate(glob)}${suffix}$`);
+	return (path) => regex.test(path);
+}
+// src/projects.ts
+const same = (a, b) => a.toLowerCase() === b.toLowerCase();
+function matchProjects(projects, repository, files, labels) {
+	return projects.filter((project) => labels.some((label) => same(label, project.name)) || project.patterns.filter((pattern) => !pattern.repository || same(pattern.repository, repository)).some((pattern) => pattern.glob === "**" || files.some(pathMatcher(pattern.glob))));
+}
+function parseCodeowners(content) {
+	return content.split("\n").map((line) => line.replace(/(^|\s)#.*$/, "").trim()).filter(Boolean).map((line) => {
+		const [pattern, ...owners] = line.split(/\s+/);
+		return {
+			matches: pathMatcher(pattern, true),
+			owners: owners.filter((owner) => owner.startsWith("@")).map((owner) => owner.slice(1))
+		};
+	});
+}
+function codeownersFor(rules, files) {
+	const owners = /* @__PURE__ */ new Map();
+	for (const file of files) {
+		const rule = rules.findLast((candidate) => candidate.matches(file));
+		for (const owner of rule?.owners ?? []) owners.set(owner.toLowerCase(), owners.get(owner.toLowerCase()) ?? owner);
+	}
+	return [...owners.values()];
 }
 // src/selection.ts
 function selectReviewer(reviewers, author, counts, requestedReviewers, previousReviewer, random) {
@@ -20334,36 +20464,72 @@ function selectReviewer(reviewers, author, counts, requestedReviewers, previousR
 	return tied[Math.floor(random() * tied.length)];
 }
 // src/run.ts
+async function resolveCategories(options, target, pull, api) {
+	const eligible = (logins) => unique(logins).filter((login) => login.toLowerCase() !== pull.author.toLowerCase());
+	const files = options.projects.length || options.codeowners ? await api.listFiles(target) : [];
+	const categories = matchProjects(options.projects, `${target.owner}/${target.repo}`, files, pull.labels).map((project) => ({
+		name: project.name,
+		candidates: project.owners
+	}));
+	if (options.codeowners) {
+		const content = await api.getCodeowners(target, pull.baseRef);
+		const candidates = [];
+		for (const owner of content ? codeownersFor(parseCodeowners(content), files) : []) {
+			const [organization, team] = owner.split("/");
+			candidates.push(...team ? await api.getTeamMembers(organization, team) : [owner]);
+		}
+		categories.push({
+			name: "Code owners",
+			candidates
+		});
+	}
+	const matched = categories.map((category) => ({
+		...category,
+		candidates: eligible(category.candidates)
+	})).filter((category) => category.candidates.length);
+	if (matched.length) return matched;
+	return [{
+		name: "All",
+		candidates: eligible(options.reviewers.length ? options.reviewers : await api.getSuggestedReviewers(target))
+	}];
+}
 async function run(options, target, api, random = Math.random) {
 	const identity = await api.checkAccess(target, options.organizations, options.issueRepositories);
 	const pull = await api.getPull(target);
-	const eligible = (options.reviewers.length ? options.reviewers : await api.getSuggestedReviewers(target)).filter((login) => login.toLowerCase() !== pull.author.toLowerCase());
-	if (!eligible.length) throw new Error("No eligible reviewers remain after excluding the PR author");
-	const counts = await api.getCounts(target, options.organizations, eligible);
-	const issueLoads = options.issueRepositories.length ? await api.getIssueLoads(options.issueRepositories, eligible, options.statusField, options.statusWeights) : void 0;
+	const categories = await resolveCategories(options, target, pull, api);
+	const everyone = unique(categories.flatMap((category) => category.candidates));
+	if (!everyone.length) throw new Error("No eligible reviewers remain after excluding the PR author");
+	const counts = await api.getCounts(target, options.organizations, everyone);
+	const issueLoads = options.issueRepositories.length ? await api.getIssueLoads(options.issueRepositories, everyone, options.statusField, options.statusWeights) : void 0;
 	const workloads = new Map([...counts].map(([login, count]) => [login, count + (issueLoads?.get(login) ?? 0)]));
 	const comment = findManagedComment(await api.listComments(target), identity);
-	const selection = selectReviewer(eligible, pull.author, workloads, pull.requestedReviewers, comment ? readSuggestion(comment.body) : void 0, random);
-	const login = selection.reviewer.toLowerCase();
-	const suggestion = {
-		...selection,
-		reviewCount: counts.get(login),
-		...issueLoads ? { issueLoad: issueLoads.get(login) } : {}
-	};
-	const alreadyRequested = pull.requestedReviewers.some((requested) => requested.toLowerCase() === login);
-	let assigned = false;
-	let status = alreadyRequested ? "already-requested" : "suggested";
-	if (options.assignReviewer && !alreadyRequested) {
-		await api.requestReview(target, suggestion.reviewer);
-		assigned = true;
-		status = "requested";
+	const previous = comment ? readSuggestions(comment.body) : void 0;
+	const outstanding = new Set(pull.requestedReviewers.map((login) => login.toLowerCase()));
+	const requested = /* @__PURE__ */ new Set();
+	const picks = [];
+	for (const category of categories) {
+		const selection = selectReviewer(category.candidates, pull.author, workloads, pull.requestedReviewers, previous?.get(category.name.toLowerCase()), random);
+		const login = selection.reviewer.toLowerCase();
+		let status = outstanding.has(login) ? "already-requested" : requested.has(login) ? "requested" : "suggested";
+		if (options.assignReviewer && status === "suggested") {
+			await api.requestReview(target, selection.reviewer);
+			requested.add(login);
+			status = "requested";
+		}
+		picks.push({
+			...selection,
+			category: category.name,
+			status,
+			reviewCount: counts.get(login),
+			...issueLoads ? { issueLoad: issueLoads.get(login) } : {}
+		});
 	}
-	const body = renderComment(suggestion, status);
+	const body = renderComment(picks);
 	if (comment) await api.updateComment(target, comment.id, body);
 	else await api.createComment(target, body);
 	return {
-		...suggestion,
-		assigned
+		picks,
+		assigned: requested.size > 0
 	};
 }
 // src/main.ts
@@ -20391,12 +20557,16 @@ async function main() {
 			"assign-reviewer": getInput("assign-reviewer"),
 			"issue-repositories": getInput("issue-repositories"),
 			"status-field": getInput("status-field"),
-			"status-weights": getInput("status-weights")
+			"status-weights": getInput("status-weights"),
+			projects: getInput("projects"),
+			codeowners: getInput("codeowners")
 		}), targetFromPayload(), new GitHubClient(token));
-		setOutput("reviewer", result.reviewer);
-		setOutput("review-count", result.reviewCount);
-		setOutput("issue-load", result.issueLoad ?? "");
-		setOutput("workload", result.workload);
+		const [first] = result.picks;
+		setOutput("reviewer", first.reviewer);
+		setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
+		setOutput("review-count", first.reviewCount);
+		setOutput("issue-load", first.issueLoad ?? "");
+		setOutput("workload", first.workload);
 		setOutput("assigned", result.assigned);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "Review roulette failed";

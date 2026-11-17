@@ -1,9 +1,16 @@
 import { expect, it } from "vite-plus/test";
-import { renderComment, readSuggestion, findManagedComment } from "../src/comment";
+import type { AssignmentStatus, ReviewerPick } from "../src/model";
+import { renderComment, readSuggestions, findManagedComment } from "../src/comment";
+const pick = (
+  reviewer: string,
+  reviewCount: number,
+  status: AssignmentStatus = "suggested",
+  category = "All",
+): ReviewerPick => ({ reviewer, reviewCount, workload: reviewCount, status, category });
 it.each(["suggested", "requested", "already-requested"] as const)(
   "renders one selection with truthful %s status",
   (status) => {
-    const body = renderComment({ reviewer: "Alice", reviewCount: 2, workload: 2 }, status);
+    const body = renderComment([pick("Alice", 2, status)]);
     expect(body).toContain("### Review roulette");
     expect(body).toContain("| Category | Suggested reviewer |");
     expect(body).toContain(
@@ -16,30 +23,55 @@ it.each(["suggested", "requested", "already-requested"] as const)(
         "already-requested": "Review already requested",
       }[status],
     );
-    expect(readSuggestion(body)).toBe("Alice");
+    expect(readSuggestions(body)).toEqual(new Map([["all", "Alice"]]));
   },
 );
 it("renders singular workload", () => {
-  expect(renderComment({ reviewer: "Bob", reviewCount: 1, workload: 1 }, "suggested")).toContain(
-    "1 pending review request |",
-  );
+  expect(renderComment([pick("Bob", 1)])).toContain("1 pending review request |");
 });
 it("adds the assigned issue load when issues are counted", () => {
-  expect(
-    renderComment({ reviewer: "Bob", reviewCount: 1, issueLoad: 4, workload: 5 }, "suggested"),
-  ).toContain("— 1 pending review request, assigned issue load 4 |");
+  expect(renderComment([{ ...pick("Bob", 1), issueLoad: 4, workload: 5 }])).toContain(
+    "— 1 pending review request, assigned issue load 4 |",
+  );
 });
 it.each([
   "hello",
   "<!-- review-roulette:v2:Alice -->",
+  "<!-- review-roulette:v2:=Alice -->",
+  "<!-- review-roulette:v2:All=bad login -->",
+  "<!-- review-roulette:v2:%E0%A4%A=Alice -->",
+  "<!-- review-roulette:v2:All=Alice&api -->",
   "<!-- review-roulette:v1:bad login -->",
   "<!-- review-roulette:v1:-bad -->",
   "<!-- review-roulette:v1:Alice -->\n<!-- review-roulette:v1:Bob -->",
 ])("ignores invalid markers", (body) => {
-  expect(readSuggestion(body)).toBeUndefined();
+  expect(readSuggestions(body)).toBeUndefined();
+});
+it("renders one row per category and round-trips names through the marker", () => {
+  const body = renderComment([
+    pick("Alice", 2, "requested", "web & ui"),
+    pick("Bob", 0, "already-requested", "API"),
+  ]);
+  expect(body).toContain(
+    "| web & ui | [@Alice](https://github.com/Alice) — 2 pending review requests | Review requested |",
+  );
+  expect(body).toContain(
+    "| API | [@Bob](https://github.com/Bob) — 0 pending review requests | Review already requested |",
+  );
+  expect(readSuggestions(body)).toEqual(
+    new Map([
+      ["web & ui", "Alice"],
+      ["api", "Bob"],
+    ]),
+  );
+});
+it("still reads the single-reviewer marker written by earlier versions", () => {
+  expect(readSuggestions("text\n<!-- review-roulette:v1:Alice -->")).toEqual(
+    new Map([["all", "Alice"]]),
+  );
 });
 it("ignores copied markers and picks earliest owned valid comment", () => {
-  const body = renderComment({ reviewer: "Alice", reviewCount: 0, workload: 0 }, "suggested");
+  const body = renderComment([pick("Alice", 0)]);
   const comments = [
     { id: 1, body, authorLogin: "mallory", authorType: "User" },
     { id: 5, body, authorLogin: "roulette[bot]", authorType: "Bot", appId: 10 },
@@ -53,7 +85,7 @@ it("supports authenticated user comments and rejects unmarked ones", () => {
     { id: 1, body: "unmarked", authorLogin: "Alice", authorType: "User" },
     {
       id: 2,
-      body: renderComment({ reviewer: "Bob", reviewCount: 0, workload: 0 }, "suggested"),
+      body: renderComment([pick("Bob", 0)]),
       authorLogin: "alice",
       authorType: "User",
     },
