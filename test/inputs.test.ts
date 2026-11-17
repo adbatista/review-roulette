@@ -17,6 +17,8 @@ describe("parseOptions", () => {
       statusWeights: new Map(),
       projects: [],
       codeowners: false,
+      command: "",
+      requiredLabel: "",
     });
   });
   it("accepts empty organization scope and explicit assignment", () => {
@@ -43,6 +45,15 @@ describe("parseOptions", () => {
       ["review: now", 2],
       ["*", 0],
     ]);
+  });
+  it("trims the command and required label", () => {
+    const result = parseOptions({
+      token: "secret",
+      command: " /roulette ",
+      "required-label": " needs review ",
+    });
+    expect(result.command).toBe("/roulette");
+    expect(result.requiredLabel).toBe("needs review");
   });
   it("parses projects with folder, repository and label-only patterns", () => {
     const result = parseOptions({

@@ -103,5 +103,7 @@ export function parseOptions(raw: Record<string, string>): Options {
     statusWeights: parseWeights(raw["status-weights"] ?? ""),
     projects: parseProjects(raw.projects ?? ""),
     codeowners: parseBoolean(raw, "codeowners"),
+    command: raw.command?.trim() ?? "",
+    requiredLabel: raw["required-label"]?.trim() ?? "",
   };
 }

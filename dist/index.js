@@ -16566,6 +16566,13 @@ function setFailed(message) {
 function error(message, properties = {}) {
 	issueCommand("error", toCommandProperties(properties), message instanceof Error ? message.toString() : message);
 }
+/**
+* Writes info to log with console.log.
+* @param message info message
+*/
+function info(message) {
+	process.stdout.write(message + os$1.EOL);
+}
 // node_modules/@actions/github/lib/context.js
 var Context = class {
 	/**
@@ -20142,7 +20149,9 @@ function parseOptions(raw) {
 		statusField: raw["status-field"]?.trim() || "Status",
 		statusWeights: parseWeights(raw["status-weights"] ?? ""),
 		projects: parseProjects(raw.projects ?? ""),
-		codeowners: parseBoolean(raw, "codeowners")
+		codeowners: parseBoolean(raw, "codeowners"),
+		command: raw.command?.trim() ?? "",
+		requiredLabel: raw["required-label"]?.trim() ?? ""
 	};
 }
 // src/github.ts
@@ -20198,6 +20207,18 @@ var GitHubClient = class {
 			requestedReviewers,
 			labels: pull.data.labels.map((label) => label.name),
 			baseRef: pull.data.base.ref
+		};
+	}
+	async getIssue(target) {
+		const issue = await this.retry(() => this.octokit.rest.issues.get({
+			...this.params(target),
+			issue_number: target.pullNumber
+		}));
+		return {
+			author: issue.data.user?.login ?? "",
+			requestedReviewers: (issue.data.assignees ?? []).map((assignee) => assignee.login),
+			labels: issue.data.labels.map((label) => typeof label === "string" ? label : label.name ?? ""),
+			baseRef: ""
 		};
 	}
 	async listFiles(target) {
@@ -20312,6 +20333,13 @@ var GitHubClient = class {
 			reviewers: [reviewer]
 		}), false);
 	}
+	async assignIssue(target, assignee) {
+		if (!(await this.retry(() => this.octokit.rest.issues.addAssignees({
+			...this.params(target),
+			issue_number: target.pullNumber,
+			assignees: [assignee]
+		}), false)).data.assignees?.some((user) => user.login.toLowerCase() === assignee.toLowerCase())) throw new Error("GitHub did not assign the selected user to the issue");
+	}
 	async createComment(target, body) {
 		await this.retry(() => this.octokit.rest.issues.createComment({
 			...this.params(target),
@@ -20355,21 +20383,30 @@ var GitHubClient = class {
 	}
 };
 // src/comment.ts
-const statusCopy = {
-	suggested: "Suggestion only",
-	requested: "Review requested",
-	"already-requested": "Review already requested"
+const copy = {
+	pull: {
+		heading: "Suggested reviewer",
+		suggested: "Suggestion only",
+		requested: "Review requested",
+		"already-requested": "Review already requested"
+	},
+	issue: {
+		heading: "Suggested assignee",
+		suggested: "Suggestion only",
+		requested: "Assigned",
+		"already-requested": "Already assigned"
+	}
 };
 function describeWorkload(suggestion) {
 	const reviews = `${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"}`;
 	return suggestion.issueLoad === void 0 ? reviews : `${reviews}, assigned issue load ${suggestion.issueLoad}`;
 }
-function renderComment(picks) {
-	const rows = picks.map((pick) => `| ${pick.category} | [@${pick.reviewer}](https://github.com/${pick.reviewer}) — ${describeWorkload(pick)} | ${statusCopy[pick.status]} |`);
+function renderComment(picks, kind = "pull") {
+	const rows = picks.map((pick) => `| ${pick.category} | [@${pick.reviewer}](https://github.com/${pick.reviewer}) — ${describeWorkload(pick)} | ${copy[kind][pick.status]} |`);
 	const marker = picks.map((pick) => `${encodeURIComponent(pick.category)}=${pick.reviewer}`).join("&");
 	return `### Review roulette
 
-| Category | Suggested reviewer | Status |
+| Category | ${copy[kind].heading} | Status |
 | --- | --- | --- |
 ${rows.join("\n")}
 
@@ -20465,13 +20502,14 @@ function selectReviewer(reviewers, author, counts, requestedReviewers, previousR
 }
 // src/run.ts
 async function resolveCategories(options, target, pull, api) {
+	const isPull = target.kind === "pull";
 	const eligible = (logins) => unique(logins).filter((login) => login.toLowerCase() !== pull.author.toLowerCase());
-	const files = options.projects.length || options.codeowners ? await api.listFiles(target) : [];
+	const files = isPull && (options.projects.length || options.codeowners) ? await api.listFiles(target) : [];
 	const categories = matchProjects(options.projects, `${target.owner}/${target.repo}`, files, pull.labels).map((project) => ({
 		name: project.name,
 		candidates: project.owners
 	}));
-	if (options.codeowners) {
+	if (options.codeowners && isPull) {
 		const content = await api.getCodeowners(target, pull.baseRef);
 		const candidates = [];
 		for (const owner of content ? codeownersFor(parseCodeowners(content), files) : []) {
@@ -20490,15 +20528,25 @@ async function resolveCategories(options, target, pull, api) {
 	if (matched.length) return matched;
 	return [{
 		name: "All",
-		candidates: eligible(options.reviewers.length ? options.reviewers : await api.getSuggestedReviewers(target))
+		candidates: eligible(options.reviewers.length || !isPull ? options.reviewers : await api.getSuggestedReviewers(target))
 	}];
 }
 async function run(options, target, api, random = Math.random) {
 	const identity = await api.checkAccess(target, options.organizations, options.issueRepositories);
-	const pull = await api.getPull(target);
+	const isPull = target.kind === "pull";
+	const snapshot = isPull ? await api.getPull(target) : await api.getIssue(target);
+	const label = options.requiredLabel.toLowerCase();
+	if (label && !snapshot.labels.some((name) => name.toLowerCase() === label)) return {
+		picks: [],
+		assigned: false
+	};
+	const pull = {
+		...snapshot,
+		author: isPull ? snapshot.author : ""
+	};
 	const categories = await resolveCategories(options, target, pull, api);
 	const everyone = unique(categories.flatMap((category) => category.candidates));
-	if (!everyone.length) throw new Error("No eligible reviewers remain after excluding the PR author");
+	if (!everyone.length) throw new Error(isPull ? "No eligible reviewers remain after excluding the PR author" : "No eligible assignees: an issue needs a matching project or a reviewers list");
 	const counts = await api.getCounts(target, options.organizations, everyone);
 	const issueLoads = options.issueRepositories.length ? await api.getIssueLoads(options.issueRepositories, everyone, options.statusField, options.statusWeights) : void 0;
 	const workloads = new Map([...counts].map(([login, count]) => [login, count + (issueLoads?.get(login) ?? 0)]));
@@ -20512,7 +20560,8 @@ async function run(options, target, api, random = Math.random) {
 		const login = selection.reviewer.toLowerCase();
 		let status = outstanding.has(login) ? "already-requested" : requested.has(login) ? "requested" : "suggested";
 		if (options.assignReviewer && status === "suggested") {
-			await api.requestReview(target, selection.reviewer);
+			if (isPull) await api.requestReview(target, selection.reviewer);
+			else await api.assignIssue(target, selection.reviewer);
 			requested.add(login);
 			status = "requested";
 		}
@@ -20524,7 +20573,7 @@ async function run(options, target, api, random = Math.random) {
 			...issueLoads ? { issueLoad: issueLoads.get(login) } : {}
 		});
 	}
-	const body = renderComment(picks);
+	const body = renderComment(picks, target.kind);
 	if (comment) await api.updateComment(target, comment.id, body);
 	else await api.createComment(target, body);
 	return {
@@ -20533,35 +20582,61 @@ async function run(options, target, api, random = Math.random) {
 	};
 }
 // src/main.ts
+const inputNames = [
+	"reviewers",
+	"organizations",
+	"assign-reviewer",
+	"issue-repositories",
+	"status-field",
+	"status-weights",
+	"projects",
+	"codeowners",
+	"command",
+	"required-label"
+];
+const trustedAssociations = [
+	"OWNER",
+	"MEMBER",
+	"COLLABORATOR"
+];
 function targetFromPayload() {
-	const pull = context.payload.pull_request;
-	const owner = pull?.base?.repo?.owner?.login;
-	const repo = pull?.base?.repo?.name;
-	const pullNumber = pull?.number;
-	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !repositoryPattern.test(repo) || typeof pullNumber !== "number" || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) throw new Error("A valid pull-request event context is required");
+	const { pull_request: pull, issue, repository } = context.payload;
+	const base = pull ? pull.base?.repo : repository;
+	const owner = base?.owner?.login;
+	const repo = base?.name;
+	const pullNumber = (pull ?? issue)?.number;
+	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !repositoryPattern.test(repo) || typeof pullNumber !== "number" || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) throw new Error("A valid pull-request or issue event context is required");
 	return {
 		owner,
 		repo,
-		pullNumber
+		pullNumber,
+		kind: pull || issue?.pull_request ? "pull" : "issue"
 	};
+}
+function commandRequested(command) {
+	if (context.eventName !== "issue_comment") return true;
+	if (!command) throw new Error("command is required for issue_comment events");
+	const comment = context.payload.comment;
+	return context.payload.action === "created" && trustedAssociations.includes(comment?.author_association) && String(comment?.body ?? "").split(/\r?\n/).some((line) => line.trim() === command);
+}
+function skip(reason) {
+	info(`Review roulette skipped: ${reason}`);
+	setOutput("skipped", true);
 }
 async function main() {
 	let token = "";
 	try {
 		token = getInput("token").trim();
 		if (token) setSecret(token);
-		const result = await run(parseOptions({
+		const options = parseOptions({
 			token,
-			reviewers: getInput("reviewers"),
-			organizations: getInput("organizations"),
-			"assign-reviewer": getInput("assign-reviewer"),
-			"issue-repositories": getInput("issue-repositories"),
-			"status-field": getInput("status-field"),
-			"status-weights": getInput("status-weights"),
-			projects: getInput("projects"),
-			codeowners: getInput("codeowners")
-		}), targetFromPayload(), new GitHubClient(token));
+			...Object.fromEntries(inputNames.map((name) => [name, getInput(name)]))
+		});
+		if (!commandRequested(options.command)) return skip("the comment is not the command from a repository collaborator");
+		const result = await run(options, targetFromPayload(), new GitHubClient(token));
 		const [first] = result.picks;
+		if (!first) return skip("the required label is missing");
+		setOutput("skipped", false);
 		setOutput("reviewer", first.reviewer);
 		setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
 		setOutput("review-count", first.reviewCount);

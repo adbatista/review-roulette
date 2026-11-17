@@ -5,11 +5,26 @@ import { GitHubClient } from "./github";
 import { run } from "./run";
 import type { Target } from "./model";
 
+const inputNames = [
+  "reviewers",
+  "organizations",
+  "assign-reviewer",
+  "issue-repositories",
+  "status-field",
+  "status-weights",
+  "projects",
+  "codeowners",
+  "command",
+  "required-label",
+];
+const trustedAssociations = ["OWNER", "MEMBER", "COLLABORATOR"];
+
 function targetFromPayload(): Target {
-  const pull = context.payload.pull_request;
-  const owner = pull?.base?.repo?.owner?.login;
-  const repo = pull?.base?.repo?.name;
-  const pullNumber = pull?.number;
+  const { pull_request: pull, issue, repository } = context.payload;
+  const base = pull ? pull.base?.repo : repository;
+  const owner = base?.owner?.login;
+  const repo = base?.name;
+  const pullNumber = (pull ?? issue)?.number;
   if (
     typeof owner !== "string" ||
     !loginPattern.test(owner) ||
@@ -19,9 +34,28 @@ function targetFromPayload(): Target {
     !Number.isSafeInteger(pullNumber) ||
     pullNumber <= 0
   ) {
-    throw new Error("A valid pull-request event context is required");
+    throw new Error("A valid pull-request or issue event context is required");
   }
-  return { owner, repo, pullNumber };
+  return { owner, repo, pullNumber, kind: pull || issue?.pull_request ? "pull" : "issue" };
+}
+
+function commandRequested(command: string): boolean {
+  if (context.eventName !== "issue_comment") return true;
+  // Without a command, the action's own comment would retrigger it under a PAT or App token.
+  if (!command) throw new Error("command is required for issue_comment events");
+  const comment = context.payload.comment;
+  return (
+    context.payload.action === "created" &&
+    trustedAssociations.includes(comment?.author_association) &&
+    String(comment?.body ?? "")
+      .split(/\r?\n/)
+      .some((line) => line.trim() === command)
+  );
+}
+
+function skip(reason: string): void {
+  core.info(`Review roulette skipped: ${reason}`);
+  core.setOutput("skipped", true);
 }
 
 export async function main(): Promise<void> {
@@ -31,18 +65,15 @@ export async function main(): Promise<void> {
     if (token) core.setSecret(token);
     const options = parseOptions({
       token,
-      reviewers: core.getInput("reviewers"),
-      organizations: core.getInput("organizations"),
-      "assign-reviewer": core.getInput("assign-reviewer"),
-      "issue-repositories": core.getInput("issue-repositories"),
-      "status-field": core.getInput("status-field"),
-      "status-weights": core.getInput("status-weights"),
-      projects: core.getInput("projects"),
-      codeowners: core.getInput("codeowners"),
+      ...Object.fromEntries(inputNames.map((name) => [name, core.getInput(name)])),
     });
+    if (!commandRequested(options.command))
+      return skip("the comment is not the command from a repository collaborator");
     const target = targetFromPayload();
     const result = await run(options, target, new GitHubClient(token));
     const [first] = result.picks;
+    if (!first) return skip("the required label is missing");
+    core.setOutput("skipped", false);
     core.setOutput("reviewer", first.reviewer);
     core.setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
     core.setOutput("review-count", first.reviewCount);

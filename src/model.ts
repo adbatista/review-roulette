@@ -10,6 +10,8 @@ export interface Options {
   statusWeights: Map<string, number>;
   projects: Project[];
   codeowners: boolean;
+  command: string;
+  requiredLabel: string;
 }
 export interface Project {
   name: string;
@@ -20,10 +22,12 @@ export interface Category {
   name: string;
   candidates: string[];
 }
+export type TargetKind = "pull" | "issue";
 export interface Target {
   owner: string;
   repo: string;
   pullNumber: number;
+  kind: TargetKind;
 }
 export interface PullSnapshot {
   author: string;

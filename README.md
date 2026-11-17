@@ -1,6 +1,6 @@
 # Review roulette
 
-A GitHub Action that picks the least-loaded reviewer from an explicit list or GitHub's native PR-specific suggestions, posts one managed pull-request comment, and optionally requests review.
+A GitHub Action that picks the least-loaded reviewer from an explicit list, per-project owners, `CODEOWNERS` or GitHub's native PR-specific suggestions, posts one managed comment, and optionally requests review. It also runs on issues, where it suggests or sets an assignee.
 
 **Workload = outstanding personal review requests on open PRs**, not PR assignees or submitted reviews. Optionally, open issues assigned to a reviewer in other repositories add to it, weighted by their project board status. The PR author is excluded. Minimum-count ties are random.
 
@@ -48,6 +48,8 @@ Both modes write a PR conversation comment and need `pull-requests: write`. Assi
 | `status-weights`     | Empty                 | One `Status name: weight` per line. Empty counts every assigned issue as 1.                             |
 | `projects`           | Empty                 | One `name \| patterns \| owners` per line; each matched project gets its own pick.                      |
 | `codeowners`         | `false`               | Also pick among the `CODEOWNERS` of the changed files.                                                  |
+| `command`            | Empty                 | Comment line that triggers the action on `issue_comment` events, such as `/roulette`.                   |
+| `required-label`     | Empty                 | Run only when the pull request or issue carries this label.                                             |
 
 Lists are trimmed, validated, and deduplicated case-insensitively. Boolean inputs accept only `true` or `false`.
 
@@ -129,6 +131,36 @@ With `codeowners: "true"`, the action reads `CODEOWNERS` from the PR's base bran
 
 When no project or code owner applies, or the PR author is the only owner, the action falls back to `reviewers` (or GitHub's suggestions) in a single `All` row. The same person can be picked for several rows and is requested once.
 
+## Comment command, labels and issues
+
+```yaml
+name: Review roulette
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [labeled]
+permissions:
+  issues: write
+  pull-requests: write
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: OWNER/review-roulette@<commit-sha>
+        with:
+          reviewers: alice, bob, carol
+          command: /roulette
+          required-label: needs-owner
+          assign-reviewer: "true"
+```
+
+- **Command**: on `issue_comment` events the action runs only when a line of a newly created comment is exactly `command`, and the commenter is a repository owner, member or collaborator. Anything else is skipped successfully. `command` is required for these events, because under a PAT or App token the action's own comment would otherwise retrigger it. On other events `command` is ignored, so one workflow can serve both.
+- **Label**: with `required-label`, the action runs only when the pull request or issue currently carries that label, compared case-insensitively. Otherwise it is skipped.
+- **Issues**: on a plain issue the action suggests an assignee, and with `assign-reviewer: "true"` assigns them, which needs `issues: write`. An issue has no changed files, so a project matches it by label or by a whole-repository pattern (`owner/repo:`), `codeowners` does not apply, and GitHub's suggestions are unavailable: without a matching project, `reviewers` is required. The issue author stays eligible. Someone already assigned is not assigned again.
+
+`issue_comment` workflows run from the default branch with a write-capable token even when the comment is on a fork's pull request, so never check out or execute PR-head code in them.
+
 ## Fork pull requests
 
 Fork `pull_request` workflows commonly receive read-only tokens, so comment/review-request writes can fail. For forks, use a metadata-only `pull_request_target` workflow:
@@ -166,14 +198,15 @@ The comment shows one selected reviewer per category:
 
 The status says suggestion-only, review requested, or review already requested. The count is captured **before** a new request in that run.
 
-| Output         | Meaning                                                                                |
-| -------------- | -------------------------------------------------------------------------------------- |
-| `reviewer`     | Selected login; the first category's pick when several are made.                       |
-| `reviewers`    | Comma-separated unique logins selected across all categories.                          |
-| `review-count` | Outstanding request count at selection time.                                           |
-| `issue-load`   | Weighted assigned issues of the selected reviewer; empty without `issue-repositories`. |
-| `workload`     | Request count plus issue load, the number used for selection.                          |
-| `assigned`     | `true` only if this run successfully created a review request; otherwise `false`.      |
+| Output         | Meaning                                                                                                   |
+| -------------- | --------------------------------------------------------------------------------------------------------- |
+| `reviewer`     | Selected login; the first category's pick when several are made.                                          |
+| `reviewers`    | Comma-separated unique logins selected across all categories.                                             |
+| `review-count` | Outstanding request count at selection time.                                                              |
+| `issue-load`   | Weighted assigned issues of the selected reviewer; empty without `issue-repositories`.                    |
+| `workload`     | Request count plus issue load, the number used for selection.                                             |
+| `assigned`     | `true` only if this run successfully created a review request; otherwise `false`.                         |
+| `skipped`      | `true` when the command or required label was missing and nothing was done; other outputs are then unset. |
 
 Outputs are published only after successful comment publication. API failures fail the action. If assignment succeeds but commenting fails, the request stays in place and the run fails; no rollback is attempted.
 

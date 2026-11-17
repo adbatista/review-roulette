@@ -1,10 +1,25 @@
 import { loginPattern } from "./inputs";
-import type { CommentIdentity, ManagedComment, ReviewerPick, Suggestion } from "./model";
+import type {
+  CommentIdentity,
+  ManagedComment,
+  ReviewerPick,
+  Suggestion,
+  TargetKind,
+} from "./model";
 
-const statusCopy = {
-  suggested: "Suggestion only",
-  requested: "Review requested",
-  "already-requested": "Review already requested",
+const copy = {
+  pull: {
+    heading: "Suggested reviewer",
+    suggested: "Suggestion only",
+    requested: "Review requested",
+    "already-requested": "Review already requested",
+  },
+  issue: {
+    heading: "Suggested assignee",
+    suggested: "Suggestion only",
+    requested: "Assigned",
+    "already-requested": "Already assigned",
+  },
 };
 
 function describeWorkload(suggestion: Suggestion): string {
@@ -14,17 +29,17 @@ function describeWorkload(suggestion: Suggestion): string {
     : `${reviews}, assigned issue load ${suggestion.issueLoad}`;
 }
 
-export function renderComment(picks: ReviewerPick[]): string {
+export function renderComment(picks: ReviewerPick[], kind: TargetKind = "pull"): string {
   const rows = picks.map(
     (pick) =>
-      `| ${pick.category} | [@${pick.reviewer}](https://github.com/${pick.reviewer}) — ${describeWorkload(pick)} | ${statusCopy[pick.status]} |`,
+      `| ${pick.category} | [@${pick.reviewer}](https://github.com/${pick.reviewer}) — ${describeWorkload(pick)} | ${copy[kind][pick.status]} |`,
   );
   const marker = picks
     .map((pick) => `${encodeURIComponent(pick.category)}=${pick.reviewer}`)
     .join("&");
   return `### Review roulette
 
-| Category | Suggested reviewer | Status |
+| Category | ${copy[kind].heading} | Status |
 | --- | --- | --- |
 ${rows.join("\n")}
 

@@ -20,6 +20,7 @@ const doubles = vi.hoisted(() => ({
   setOutput: vi.fn(),
   setFailed: vi.fn(),
   setSecret: vi.fn(),
+  info: vi.fn(),
   create: vi.fn(function () {}),
   run: vi.fn(),
 }));
@@ -28,6 +29,7 @@ vi.mock("@actions/core", () => ({
   setOutput: doubles.setOutput,
   setFailed: doubles.setFailed,
   setSecret: doubles.setSecret,
+  info: doubles.info,
 }));
 vi.mock("@actions/github", () => ({ context: doubles.context }));
 vi.mock("../src/github", () => ({ GitHubClient: doubles.create }));
@@ -49,8 +51,10 @@ it.each(["pull_request", "pull_request_target"])(
       owner: "base-owner",
       repo: "project",
       pullNumber: 7,
+      kind: "pull",
     });
     expect(doubles.setOutput.mock.calls).toEqual([
+      ["skipped", false],
       ["reviewer", "Alice"],
       ["reviewers", "Alice"],
       ["review-count", 3],
@@ -126,4 +130,66 @@ it("handles non-Error failures without serializing arbitrary objects", async () 
   doubles.run.mockRejectedValue({ token: "secret" });
   await main();
   expect(doubles.setFailed).toHaveBeenCalledWith("Review roulette failed");
+});
+function commentEvent(
+  body: string,
+  overrides: { association?: string; action?: string; pull?: boolean } = {},
+) {
+  return {
+    action: overrides.action ?? "created",
+    repository: { name: "project", owner: { login: "base-owner" } },
+    issue: { number: 12, ...(overrides.pull ? { pull_request: {} } : {}) },
+    comment: { body, author_association: overrides.association ?? "MEMBER" },
+  };
+}
+async function withEvent(event: string, payload: Record<string, unknown>, command = "/roulette") {
+  const previous = { ...doubles.context };
+  doubles.context.eventName = event;
+  doubles.context.payload = payload;
+  doubles.inputs.command = command;
+  await main();
+  Object.assign(doubles.context, previous);
+  delete doubles.inputs.command;
+}
+it.each([
+  [true, "pull"],
+  [false, "issue"],
+])("runs a collaborator's command comment (pull request: %s)", async (pull, kind) => {
+  await withEvent("issue_comment", commentEvent("please\r\n  /roulette  \nthanks", { pull }));
+  expect(doubles.run.mock.calls.at(-1)?.[1]).toEqual({
+    owner: "base-owner",
+    repo: "project",
+    pullNumber: 12,
+    kind,
+  });
+  expect(doubles.setOutput).toHaveBeenCalledWith("skipped", false);
+});
+it.each([
+  ["a different comment", commentEvent("nice work /roulette")],
+  ["an outside commenter", commentEvent("/roulette", { association: "CONTRIBUTOR" })],
+  ["an edited comment", commentEvent("/roulette", { action: "edited" })],
+])("skips %s without touching the API", async (_name, payload) => {
+  await withEvent("issue_comment", payload);
+  expect(doubles.create).not.toHaveBeenCalled();
+  expect(doubles.setOutput.mock.calls).toEqual([["skipped", true]]);
+  expect(doubles.setFailed).not.toHaveBeenCalled();
+});
+it("refuses comment events without a command to avoid retriggering on its own comment", async () => {
+  await withEvent("issue_comment", commentEvent("/roulette"), "");
+  expect(doubles.create).not.toHaveBeenCalled();
+  expect(doubles.setFailed).toHaveBeenCalledWith("command is required for issue_comment events");
+});
+it("ignores the command on other events and runs on a labeled issue event", async () => {
+  await withEvent("issues", {
+    action: "labeled",
+    repository: { name: "project", owner: { login: "base-owner" } },
+    issue: { number: 3 },
+  });
+  expect(doubles.run.mock.calls.at(-1)?.[1]).toMatchObject({ pullNumber: 3, kind: "issue" });
+});
+it("reports a skip when the run makes no pick", async () => {
+  doubles.run.mockResolvedValue({ picks: [], assigned: false });
+  await main();
+  expect(doubles.setOutput.mock.calls).toEqual([["skipped", true]]);
+  expect(doubles.info.mock.calls[0][0]).toMatch(/required label/);
 });

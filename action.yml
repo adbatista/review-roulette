@@ -1,5 +1,5 @@
 name: Reviewer Auto Suggest
-description: Suggest the least-loaded reviewer and optionally request their review.
+description: Suggest the least-loaded reviewer for a pull request or assignee for an issue, and optionally request or assign them.
 author: Allure Team
 branding:
   icon: check-circle
@@ -33,7 +33,15 @@ inputs:
   codeowners:
     description: Also pick among the CODEOWNERS of the changed files.
     default: "false"
+  command:
+    description: Comment line that triggers the action on issue_comment events, such as /roulette. Only repository owners, members and collaborators can trigger it. Required for issue_comment events.
+    default: ""
+  required-label:
+    description: Run only when the pull request or issue carries this label.
+    default: ""
 outputs:
+  skipped:
+    description: Whether the run was skipped because the command or required label was missing.
   reviewer:
     description: Selected reviewer login; the first category's pick when several are made.
   reviewers:

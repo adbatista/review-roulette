@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { GitHubClient } from "../src/github";
-const target = { owner: "acme", repo: "project", pullNumber: 7 };
+import type { Target } from "../src/model";
+const target: Target = { owner: "acme", repo: "project", pullNumber: 7, kind: "pull" };
 function harness(replies: { body: unknown; status?: number; headers?: Record<string, string> }[]) {
   const calls: { url: string; body: Record<string, unknown>; method: string }[] = [];
   const waits: number[] = [];
@@ -306,6 +307,42 @@ describe("REST integration", () => {
       labels: ["web", "bug"],
       baseRef: "release",
     });
+    expect(calls).toHaveLength(3);
+  });
+  it("reads an issue's author, assignees and labels", async () => {
+    const { api, calls } = harness([
+      {
+        body: {
+          user: { login: "author" },
+          assignees: [{ login: "Alice" }],
+          labels: ["plain", { name: "web" }, {}],
+        },
+      },
+      { body: { user: null, labels: [] } },
+    ]);
+    expect(await api.getIssue(target)).toEqual({
+      author: "author",
+      requestedReviewers: ["Alice"],
+      labels: ["plain", "web", ""],
+      baseRef: "",
+    });
+    expect(new URL(calls[0].url).pathname).toBe("/repos/acme/project/issues/7");
+    expect(await api.getIssue(target)).toMatchObject({ author: "", requestedReviewers: [] });
+  });
+  it("assigns an issue once and rejects a silently dropped assignee", async () => {
+    const { api, calls } = harness([
+      { status: 201, body: { assignees: [{ login: "alice" }] } },
+      { status: 201, body: { assignees: [] } },
+      { status: 503, body: {} },
+    ]);
+    await api.assignIssue(target, "Alice");
+    expect([calls[0].method, new URL(calls[0].url).pathname, calls[0].body]).toEqual([
+      "POST",
+      "/repos/acme/project/issues/7/assignees",
+      { assignees: ["Alice"] },
+    ]);
+    await expect(api.assignIssue(target, "Alice")).rejects.toThrow(/did not assign/);
+    await expect(api.assignIssue(target, "Alice")).rejects.toThrow();
     expect(calls).toHaveLength(3);
   });
   it("paginates changed files", async () => {

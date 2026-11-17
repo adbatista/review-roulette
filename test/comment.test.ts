@@ -65,6 +65,15 @@ it("renders one row per category and round-trips names through the marker", () =
     ]),
   );
 });
+it.each([
+  ["suggested", "Suggestion only"],
+  ["requested", "Assigned"],
+  ["already-requested", "Already assigned"],
+] as const)("words an issue comment as an assignment for %s", (status, text) => {
+  const body = renderComment([pick("Alice", 1, status)], "issue");
+  expect(body).toContain("| Category | Suggested assignee | Status |");
+  expect(body).toContain(`| ${text} |`);
+});
 it("still reads the single-reviewer marker written by earlier versions", () => {
   expect(readSuggestions("text\n<!-- review-roulette:v1:Alice -->")).toEqual(
     new Map([["all", "Alice"]]),

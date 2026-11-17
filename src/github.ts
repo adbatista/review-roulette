@@ -114,6 +114,20 @@ export class GitHubClient {
     };
   }
 
+  public async getIssue(target: Target) {
+    const issue = await this.retry(() =>
+      this.octokit.rest.issues.get({ ...this.params(target), issue_number: target.pullNumber }),
+    );
+    return {
+      author: issue.data.user?.login ?? "",
+      requestedReviewers: (issue.data.assignees ?? []).map((assignee) => assignee.login),
+      labels: issue.data.labels.map((label) =>
+        typeof label === "string" ? label : (label.name ?? ""),
+      ),
+      baseRef: "",
+    };
+  }
+
   public async listFiles(target: Target) {
     const files = await this.retry(() =>
       this.octokit.paginate(this.octokit.rest.pulls.listFiles, {
@@ -281,6 +295,23 @@ export class GitHubClient {
         }),
       false,
     );
+  }
+
+  public async assignIssue(target: Target, assignee: string) {
+    const response = await this.retry(
+      () =>
+        this.octokit.rest.issues.addAssignees({
+          ...this.params(target),
+          issue_number: target.pullNumber,
+          assignees: [assignee],
+        }),
+      false,
+    );
+    // GitHub answers 201 but drops users who cannot be assigned in this repository.
+    if (
+      !response.data.assignees?.some((user) => user.login.toLowerCase() === assignee.toLowerCase())
+    )
+      throw new Error("GitHub did not assign the selected user to the issue");
   }
 
   public async createComment(target: Target, body: string) {

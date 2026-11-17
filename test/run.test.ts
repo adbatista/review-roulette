@@ -1,7 +1,7 @@
 import { expect, it } from "vite-plus/test";
 import { run } from "../src/run";
 import { renderComment } from "../src/comment";
-import type { GitHubApi, Options, ManagedComment, ReviewerPick } from "../src/model";
+import type { GitHubApi, Options, ManagedComment, ReviewerPick, Target } from "../src/model";
 const options: Options = {
   token: "fake",
   reviewers: ["Author", "Alice", "Bob"],
@@ -12,6 +12,8 @@ const options: Options = {
   statusWeights: new Map(),
   projects: [],
   codeowners: false,
+  command: "",
+  requiredLabel: "",
 };
 const pick = (reviewer: string, reviewCount: number, category = "All"): ReviewerPick => ({
   reviewer,
@@ -20,7 +22,7 @@ const pick = (reviewer: string, reviewCount: number, category = "All"): Reviewer
   category,
   status: "suggested",
 });
-const target = { owner: "acme", repo: "project", pullNumber: 7 };
+const target: Target = { owner: "acme", repo: "project", pullNumber: 7, kind: "pull" };
 function fixture(
   settings: {
     requested?: string[];
@@ -56,6 +58,18 @@ function fixture(
         labels: settings.labels ?? [],
         baseRef: "main",
       };
+    },
+    async getIssue() {
+      step("issue");
+      return {
+        author: settings.author ?? "author",
+        requestedReviewers: settings.requested ?? [],
+        labels: settings.labels ?? [],
+        baseRef: "",
+      };
+    },
+    async assignIssue(_target, assignee) {
+      step("assign:" + assignee);
     },
     async listFiles() {
       step("files");
@@ -319,3 +333,54 @@ it.each(["files", "codeowners:main", "team:acme/web"])(
     expect(f.published).toEqual([]);
   },
 );
+it("skips before any lookup beyond the target when the required label is missing", async () => {
+  const f = fixture({ labels: ["bug"] });
+  const result = await run({ ...options, requiredLabel: "needs-review" }, target, f.api);
+  expect(result).toEqual({ picks: [], assigned: false });
+  expect(f.events).toEqual(["access", "pull"]);
+});
+it("runs when the required label is present in any case", async () => {
+  const f = fixture({ labels: ["Needs-Review"] });
+  const result = await run({ ...options, requiredLabel: "needs-review" }, target, f.api, () => 0);
+  expect(result.picks).toEqual([pick("Alice", 1)]);
+});
+const issue: Target = { ...target, kind: "issue" };
+it("assigns an issue by label-matched project and may pick its author", async () => {
+  const f = fixture({
+    labels: ["api"],
+    counts: new Map([
+      ["author", 0],
+      ["bob", 2],
+    ]),
+  });
+  const result = await run(
+    { ...options, projects: [web, api], codeowners: true, assignReviewer: true },
+    issue,
+    f.api,
+    () => 0,
+  );
+  expect(result.picks).toEqual([{ ...pick("author", 0, "api"), status: "requested" }]);
+  expect(result.assigned).toBe(true);
+  expect(f.events).toEqual(["access", "issue", "counts", "comments", "assign:author", "create"]);
+  expect(f.published[0]).toContain("| Category | Suggested assignee | Status |");
+  expect(f.published[0]).toContain("| Assigned |");
+});
+it("does not reassign an issue's existing assignee", async () => {
+  const f = fixture({ requested: ["alice"] });
+  const result = await run(
+    { ...options, reviewers: ["Alice", "Bob"], assignReviewer: true },
+    issue,
+    f.api,
+    () => 0,
+  );
+  expect(result.assigned).toBe(false);
+  expect(f.events).not.toContain("assign:Alice");
+  expect(f.published[0]).toContain("Already assigned");
+});
+it("fails for an issue with neither a matching project nor a reviewer list", async () => {
+  const f = fixture();
+  await expect(run({ ...options, reviewers: [], projects: [web] }, issue, f.api)).rejects.toThrow(
+    /eligible assignees/,
+  );
+  expect(f.events).toEqual(["access", "issue"]);
+});
