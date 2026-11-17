@@ -1,0 +1,85 @@
+version: v1.0
+name: "\U0001F48E Ruby CI Pipeline"
+agent:
+  machine:
+    type: f1-standard-2
+    os_image: ubuntu2404
+fail_fast:
+  stop:
+    when: branch != 'main'
+auto_cancel:
+  running:
+    when: branch != 'main'
+  queued:
+    when: branch = 'main'
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      - sem-version ruby 4.0.0
+      - bundle config set --local path 'vendor/bundle
+      - bundle config set --local deployment 'true'
+      - cache restore
+blocks:
+  - name: "\U0001F6E0 Setup & Cache"
+    task:
+      jobs:
+        - name: Install Gems & JS deps
+          commands:
+            - bundle install
+            - gem install --no-document semaphore_test_boosters
+            - cache store
+    dependencies: []
+  - name: "\U0001F9F9 RuboCop"
+    task:
+      jobs:
+        - name: Ruby Style Check
+          commands:
+            - bundle exec rubocop
+    dependencies:
+      - "\U0001F6E0 Setup & Cache"
+  - name: "\U0001F6E1️ Brakeman"
+    task:
+      jobs:
+        - name: Static Analysis
+          commands:
+            - bundle exec brakeman --force
+    dependencies:
+      - "\U0001F6E0 Setup & Cache"
+  - name: "\U0001F6E1️ Bundler Audit"
+    task:
+      jobs:
+        - name: Gem CVE Check
+          commands:
+            - bundle exec bundle-audit check --update
+    dependencies:
+      - "\U0001F6E0 Setup & Cache"
+  - name: "\U0001F6A6 RSpec Suite"
+    task:
+      env_vars:
+        - name: RAILS_ENV
+          value: test
+        - name: PGHOST
+          value: 127.0.0.1
+        - name: PGUSER
+          value: postgres
+      jobs:
+        - name: "\U0001F7E2 RSpec Tests"
+          parallelism: 4
+          commands:
+            - cache restore
+            - rspec_booster --job "$SEMAPHORE_JOB_INDEX/$SEMAPHORE_JOB_COUNT" --format RspecJunitFormatter --out report.xml --format documentation
+      epilogue:
+        always:
+          commands:
+            - '[[ -f report.xml ]] && test-results publish report.xml'
+    dependencies:
+      - "\U0001F9F9 RuboCop"
+      - "\U0001F6E1️ Brakeman"
+      - "\U0001F6E1️ Bundler Audit"
+after_pipeline:
+  task:
+    jobs:
+      - name: "\U0001F4CA Merge Results"
+        commands:
+          - test-results gen-pipeline-report
