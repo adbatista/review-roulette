@@ -6,7 +6,7 @@ A GitHub Action that picks the least-loaded reviewer from an explicit list, per-
 
 ## Quick start
 
-Replace `OWNER/review-roulette@<commit-sha>` with this action's published repository and a trusted commit SHA. Consumers need no checkout or dependency installation: the action is plain Ruby with no gems, and needs Ruby 3.2 or newer on the runner, which GitHub-hosted runners already have.
+Replace `OWNER/review-roulette@<commit-sha>` with this action's published repository and a trusted commit SHA. Consumers need no checkout or dependency installation: the action is plain Ruby with no gems, and needs a supported Ruby (3.3 or newer) on the runner. The `ubuntu-latest` image has one; on an image with an older Ruby, add `ruby/setup-ruby` before this action.
 
 ```yaml
 name: Review roulette
@@ -282,7 +282,7 @@ Each category remembers its own pick:
 
 ## Development
 
-The action is plain Ruby (3.2 or newer) and uses only the standard library at runtime. Development needs the gems in the `Gemfile`:
+The action is plain Ruby (3.3 or newer). At runtime it uses only the standard library and `base64`, which ships with Ruby. Development needs the gems in the `Gemfile`:
 
 ```sh
 bundle install
