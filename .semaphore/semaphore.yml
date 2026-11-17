@@ -16,43 +16,40 @@ global_job_config:
   prologue:
     commands:
       - checkout
-      - sem-version ruby 4.0.0
+      - export TEST_RUBY="${TEST_RUBY:-3.3}"
+      - sem-version ruby "$TEST_RUBY"
       # .ruby-version pins 3.3 for local use and would override sem-version.
       - export RBENV_VERSION="$(rbenv global)"
+      - ruby --version
       - bundle config set --local path 'vendor/bundle'
       - bundle config set --local deployment 'true'
-      - cache restore
+      - export GEMS_CACHE_KEY="gems-$TEST_RUBY-$(checksum Gemfile.lock)"
+      - cache restore "$GEMS_CACHE_KEY"
+      - bundle install
+      - cache store "$GEMS_CACHE_KEY" vendor/bundle
 blocks:
-  - name: "\U0001F6E0 Setup & Cache"
-    task:
-      jobs:
-        - name: Install Gems
-          commands:
-            - bundle install
-            - cache store
-    dependencies: []
   - name: "\U0001F9F9 RuboCop"
+    dependencies: []
     task:
       jobs:
-        - name: Ruby Style Check
+        - name: Lint
           commands:
             - bundle exec rubocop
-    dependencies:
-      - "\U0001F6E0 Setup & Cache"
+  - name: "\U0001F6A6 Tests"
+    dependencies: []
+    task:
+      jobs:
+        - name: Test
+          matrix:
+            - env_var: TEST_RUBY
+              values: ["3.3", "3.4", "4.0"]
+          commands:
+            - bundle exec rake test
   - name: "\U0001F6E1️ Bundler Audit"
+    dependencies: []
     task:
       jobs:
         - name: Gem CVE Check
           commands:
             - gem install --no-document bundler-audit
             - bundle-audit check --update
-    dependencies:
-      - "\U0001F6E0 Setup & Cache"
-  - name: "\U0001F6A6 Tests"
-    task:
-      jobs:
-        - name: "\U0001F7E2 Unit and acceptance tests"
-          commands:
-            - bundle exec rake test
-    dependencies:
-      - "\U0001F6E0 Setup & Cache"
