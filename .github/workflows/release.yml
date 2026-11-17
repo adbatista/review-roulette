@@ -43,20 +43,21 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Install dependencies
-        uses: ./.github/actions/install
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
 
-      - name: Build
-        run: yarn build
-
-      - name: Verify build
-        run: |
-          git diff --exit-code -- dist
-          test -z "$(git ls-files --others --exclude-standard -- dist)"
+      - name: Test
+        run: bundle exec rake test
 
       - name: Commit release version and create tag
+        env:
+          SEMVER: ${{ inputs.semver }}
         run: |
           git config user.name "$GIT_COMMIT_AUTHOR_NAME"
           git config user.email "$GIT_COMMIT_AUTHOR_EMAIL"
-          npm version ${{ github.event.inputs.semver }}
+          version=$(bundle exec rake "version:bump[$SEMVER]")
+          git commit -am "$version"
+          git tag "v$version"
           git push && git push --tags

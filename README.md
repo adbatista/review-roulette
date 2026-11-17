@@ -6,7 +6,7 @@ A GitHub Action that picks the least-loaded reviewer from an explicit list, per-
 
 ## Quick start
 
-Replace `OWNER/review-roulette@<commit-sha>` with this action's published repository and a trusted commit SHA. Consumers need no checkout or dependency installation.
+Replace `OWNER/review-roulette@<commit-sha>` with this action's published repository and a trusted commit SHA. Consumers need no checkout or dependency installation: the action is plain Ruby with no gems, and needs Ruby 3.2 or newer on the runner, which GitHub-hosted runners already have.
 
 ```yaml
 name: Review roulette
@@ -163,7 +163,7 @@ jobs:
 
 ## Running on Semaphore
 
-The same bundle runs outside GitHub Actions. On Semaphore it reads its settings from environment variables and targets the pull request of the current build. The repository must be hosted on GitHub.
+The same program runs outside GitHub Actions. On Semaphore it reads its settings from environment variables and targets the pull request of the current build. The repository must be hosted on GitHub.
 
 ```yaml
 blocks:
@@ -179,10 +179,10 @@ blocks:
       jobs:
         - name: Suggest reviewer
           commands:
-            - sem-version node 24
+            - sem-version ruby 3.3
             - git clone https://github.com/OWNER/review-roulette.git /tmp/review-roulette
             - git -C /tmp/review-roulette checkout <commit-sha>
-            - node /tmp/review-roulette/dist/index.js
+            - ruby /tmp/review-roulette/bin/review-roulette
 ```
 
 Semaphore has no built-in GitHub token, so store a PAT or GitHub App token in a secret as `ROULETTE_TOKEN` (`GITHUB_TOKEN` is used as a fallback). It needs the same access described above.
@@ -279,3 +279,17 @@ Each category remembers its own pick:
 - Otherwise retain a prior suggestion only while it shares the minimum count.
 - Never request the chosen reviewer again if they are already requested, even without a prior comment.
 - Changing token identity can result in a new managed comment. Concurrent runs or manually duplicated owned comments are not consolidated automatically.
+
+## Development
+
+The action is plain Ruby (3.2 or newer) and uses only the standard library at runtime. Development needs the gems in the `Gemfile`:
+
+```sh
+bundle install
+bundle exec rake test      # unit and acceptance tests
+bundle exec rubocop        # lint
+```
+
+- `test/unit` covers each module in isolation.
+- `test/acceptance` runs `bin/review-roulette` as a subprocess against an in-process fake of the GitHub API, under both GitHub Actions and Semaphore environments. Set `ROULETTE_BIN` to run the same suite against another executable.
+- `bundle exec rake "version:bump[patch]"` bumps `lib/review_roulette/version.rb`; the release workflow uses it and tags the result.

@@ -9,34 +9,31 @@ permissions:
   contents: read
 
 jobs:
-  check:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - &checkout
-        name: Checkout
+      - name: Checkout
         uses: actions/checkout@v7
-      - &install
-        name: Install dependencies
-        uses: ./.github/actions/install
-      - name: Run check
-        run: yarn check
-
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - *checkout
-      - *install
-      - name: Build
-        run: yarn build
-      - name: Verify build
-        run: |
-          git diff --exit-code -- dist
-          test -z "$(git ls-files --others --exclude-standard -- dist)"
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          bundler-cache: true
+      - name: Lint
+        run: bundle exec rubocop
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ruby: ["3.2", "3.3", "3.4", "4.0"]
     steps:
-      - *checkout
-      - *install
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: true
       - name: Test
-        run: yarn coverage
+        run: bundle exec rake test

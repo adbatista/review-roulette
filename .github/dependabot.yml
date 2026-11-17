@@ -1,16 +1,14 @@
 version: 2
 updates:
-  - package-ecosystem: npm
+  - package-ecosystem: bundler
     directory: /
     schedule:
       interval: daily
-      labels:
-        - pr:dependencies
-    groups:
-      vite-stack:
-        patterns:
-          - vite
-          - vite-plus
-          - vitest
-          - "@vitest/*"
-          - "@voidzero-dev/vite-plus*"
+    labels:
+      - pr:dependencies
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - pr:dependencies
