@@ -22,3 +22,25 @@ Style/PerlBackrefs:
 Metrics:
   Exclude:
     - test/**/*
+
+Metrics/AbcSize:
+  Max: 30
+
+Metrics/ClassLength:
+  Max: 300
+
+Metrics/CyclomaticComplexity:
+  Max: 12
+
+Metrics/MethodLength:
+  Max: 20
+
+Metrics/PerceivedComplexity:
+  Max: 12
+
+Metrics/ParameterLists:
+  CountKeywordArgs: false
+
+Naming/PredicateMethod:
+  Exclude:
+    - test/**/*
