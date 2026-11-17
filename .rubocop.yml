@@ -1,0 +1,24 @@
+AllCops:
+  TargetRubyVersion: 3.2
+  NewCops: enable
+  SuggestExtensions: false
+  Exclude:
+    - node_modules/**/*
+    - vendor/**/*
+
+Layout/LineLength:
+  Max: 120
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/Documentation:
+  Enabled: false
+
+Style/PerlBackrefs:
+  Exclude:
+    - test/acceptance/support/fake_github.rb
+
+Metrics:
+  Exclude:
+    - test/**/*
