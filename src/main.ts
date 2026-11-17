@@ -1,8 +1,7 @@
-import * as core from "@actions/core";
-import { context } from "@actions/github";
 import { parseOptions, loginPattern, repositoryPattern } from "./inputs";
 import { GitHubClient } from "./github";
 import { run } from "./run";
+import type { Host, HostEvent } from "./host";
 import type { Target } from "./model";
 
 const inputNames = [
@@ -19,69 +18,65 @@ const inputNames = [
 ];
 const trustedAssociations = ["OWNER", "MEMBER", "COLLABORATOR"];
 
-function targetFromPayload(): Target {
-  const { pull_request: pull, issue, repository } = context.payload;
-  const base = pull ? pull.base?.repo : repository;
-  const owner = base?.owner?.login;
-  const repo = base?.name;
-  const pullNumber = (pull ?? issue)?.number;
+function resolveTarget(event: HostEvent): Target {
+  const { owner, repo, number, kind } = event.target ?? {};
   if (
     typeof owner !== "string" ||
     !loginPattern.test(owner) ||
     typeof repo !== "string" ||
     !repositoryPattern.test(repo) ||
-    typeof pullNumber !== "number" ||
-    !Number.isSafeInteger(pullNumber) ||
-    pullNumber <= 0
+    typeof number !== "number" ||
+    !Number.isSafeInteger(number) ||
+    number <= 0 ||
+    !kind
   ) {
     throw new Error("A valid pull-request or issue event context is required");
   }
-  return { owner, repo, pullNumber, kind: pull || issue?.pull_request ? "pull" : "issue" };
+  return { owner, repo, pullNumber: number, kind };
 }
 
-function commandRequested(command: string): boolean {
-  if (context.eventName !== "issue_comment") return true;
+function commandRequested(command: string, comment: HostEvent["comment"]): boolean {
+  if (!comment) return true;
   // Without a command, the action's own comment would retrigger it under a PAT or App token.
   if (!command) throw new Error("command is required for issue_comment events");
-  const comment = context.payload.comment;
   return (
-    context.payload.action === "created" &&
-    trustedAssociations.includes(comment?.author_association) &&
-    String(comment?.body ?? "")
-      .split(/\r?\n/)
-      .some((line) => line.trim() === command)
+    comment.created &&
+    trustedAssociations.includes(String(comment.association)) &&
+    typeof comment.body === "string" &&
+    comment.body.split(/\r?\n/).some((line) => line.trim() === command)
   );
 }
 
-function skip(reason: string): void {
-  core.info(`Review roulette skipped: ${reason}`);
-  core.setOutput("skipped", true);
-}
-
-export async function main(): Promise<void> {
+export async function main(host: Host): Promise<void> {
   let token = "";
+  const skip = (reason: string) => {
+    host.info(`Review roulette skipped: ${reason}`);
+    host.output("skipped", true);
+  };
   try {
-    token = core.getInput("token").trim();
-    if (token) core.setSecret(token);
+    token = host.input("token").trim();
+    if (token) host.secret(token);
     const options = parseOptions({
       token,
-      ...Object.fromEntries(inputNames.map((name) => [name, core.getInput(name)])),
+      ...Object.fromEntries(inputNames.map((name) => [name, host.input(name)])),
     });
-    if (!commandRequested(options.command))
+    const event = host.event();
+    if (event.skip) return skip(event.skip);
+    if (!commandRequested(options.command, event.comment))
       return skip("the comment is not the command from a repository collaborator");
-    const target = targetFromPayload();
+    const target = resolveTarget(event);
     const result = await run(options, target, new GitHubClient(token));
     const [first] = result.picks;
     if (!first) return skip("the required label is missing");
-    core.setOutput("skipped", false);
-    core.setOutput("reviewer", first.reviewer);
-    core.setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
-    core.setOutput("review-count", first.reviewCount);
-    core.setOutput("issue-load", first.issueLoad ?? "");
-    core.setOutput("workload", first.workload);
-    core.setOutput("assigned", result.assigned);
+    host.output("skipped", false);
+    host.output("reviewer", first.reviewer);
+    host.output("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
+    host.output("review-count", first.reviewCount);
+    host.output("issue-load", first.issueLoad ?? "");
+    host.output("workload", first.workload);
+    host.output("assigned", result.assigned);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Review roulette failed";
-    core.setFailed(token ? message.replaceAll(token, "***") : message);
+    host.fail(token ? message.replaceAll(token, "***") : message);
   }
 }

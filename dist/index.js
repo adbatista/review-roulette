@@ -8,6 +8,7 @@ import "path";
 import * as events from "events";
 import "child_process";
 import "timers";
+import { appendFileSync, readFileSync as readFileSync$1 } from "node:fs";
 // \0rolldown/runtime.js
 var __create = Object.create;
 var __defProp = Object.defineProperty;
@@ -20068,6 +20069,99 @@ const context = new Context();
 function getOctokit(token, options, ...additionalPlugins) {
 	return new (GitHub.plugin(...additionalPlugins))(getOctokitOptions(token, options));
 }
+// src/hosts/actions.ts
+function actionsHost() {
+	return {
+		input: (name) => getInput(name),
+		event() {
+			const { pull_request: pull, issue, repository, comment, action } = context.payload;
+			const base = pull ? pull.base?.repo : repository;
+			return {
+				target: {
+					owner: base?.owner?.login,
+					repo: base?.name,
+					number: (pull ?? issue)?.number,
+					kind: pull || issue?.pull_request ? "pull" : "issue"
+				},
+				...context.eventName === "issue_comment" ? { comment: {
+					created: action === "created",
+					association: comment?.author_association,
+					body: comment?.body
+				} } : {}
+			};
+		},
+		secret: (value) => setSecret(value),
+		info: (message) => info(message),
+		output: (name, value) => setOutput(name, value),
+		fail: (message) => setFailed(message)
+	};
+}
+// src/hosts/semaphore.ts
+const variable = (name) => `ROULETTE_${name.toUpperCase().replaceAll("-", "_")}`;
+function stringify(value) {
+	if (Array.isArray(value)) return value.map(String).join("\n");
+	if (value && typeof value === "object") return Object.entries(value).map(([key, entry]) => `${key}: ${entry}`).join("\n");
+	return [
+		"string",
+		"number",
+		"boolean"
+	].includes(typeof value) ? `${value}` : "";
+}
+function semaphoreHost(env = process.env) {
+	let config;
+	const loadConfig = () => {
+		if (config) return config;
+		const path = env.ROULETTE_CONFIG?.trim();
+		const parsed = path ? JSON.parse(readFileSync$1(path, "utf8")) : {};
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("ROULETTE_CONFIG must point to a JSON object");
+		return config = parsed;
+	};
+	const info = (message) => console.log(message);
+	return {
+		input(name) {
+			const value = env[variable(name)];
+			if (value !== void 0) return value;
+			if (name === "token") return env.GITHUB_TOKEN ?? "";
+			return stringify(loadConfig()[name]);
+		},
+		event() {
+			if (env.SEMAPHORE_GIT_PROVIDER && env.SEMAPHORE_GIT_PROVIDER !== "github") throw new Error("Review roulette only supports repositories hosted on GitHub");
+			const [owner, repo, ...rest] = (env.ROULETTE_REPOSITORY ?? env.SEMAPHORE_GIT_REPO_SLUG ?? "").split("/");
+			const number = (env.ROULETTE_NUMBER ?? env.SEMAPHORE_GIT_PR_NUMBER ?? "").trim();
+			const kind = env.ROULETTE_KIND?.trim() || "pull";
+			if (kind !== "pull" && kind !== "issue") throw new Error("ROULETTE_KIND must be pull or issue");
+			if (!number) return { skip: "this is not a pull-request build and ROULETTE_NUMBER is unset" };
+			return { target: {
+				owner,
+				repo: rest.length ? void 0 : repo,
+				number: /^\d+$/.test(number) ? Number(number) : void 0,
+				kind
+			} };
+		},
+		secret() {},
+		info,
+		output(name, value) {
+			const line = `${variable(name)}=${value}`;
+			info(line);
+			const path = env.ROULETTE_OUTPUT_FILE?.trim();
+			if (path) appendFileSync(path, line + "\n");
+		},
+		fail(message) {
+			console.error(`Review roulette failed: ${message}`);
+			process.exitCode = 1;
+		}
+	};
+}
+// src/host.ts
+const hosts = {
+	actions: actionsHost,
+	semaphore: semaphoreHost
+};
+function detectHost(env = process.env) {
+	const name = env.ROULETTE_HOST?.trim() || (env.GITHUB_ACTIONS === "true" ? "actions" : "semaphore");
+	if (!Object.hasOwn(hosts, name)) throw new Error(`ROULETTE_HOST must be one of: ${Object.keys(hosts).join(", ")}`);
+	return hosts[name](env);
+}
 // src/inputs.ts
 const repositoryPattern = /^[\w.-]+$/;
 const loginPattern = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
@@ -20599,55 +20693,52 @@ const trustedAssociations = [
 	"MEMBER",
 	"COLLABORATOR"
 ];
-function targetFromPayload() {
-	const { pull_request: pull, issue, repository } = context.payload;
-	const base = pull ? pull.base?.repo : repository;
-	const owner = base?.owner?.login;
-	const repo = base?.name;
-	const pullNumber = (pull ?? issue)?.number;
-	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !repositoryPattern.test(repo) || typeof pullNumber !== "number" || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) throw new Error("A valid pull-request or issue event context is required");
+function resolveTarget(event) {
+	const { owner, repo, number, kind } = event.target ?? {};
+	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !repositoryPattern.test(repo) || typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0 || !kind) throw new Error("A valid pull-request or issue event context is required");
 	return {
 		owner,
 		repo,
-		pullNumber,
-		kind: pull || issue?.pull_request ? "pull" : "issue"
+		pullNumber: number,
+		kind
 	};
 }
-function commandRequested(command) {
-	if (context.eventName !== "issue_comment") return true;
+function commandRequested(command, comment) {
+	if (!comment) return true;
 	if (!command) throw new Error("command is required for issue_comment events");
-	const comment = context.payload.comment;
-	return context.payload.action === "created" && trustedAssociations.includes(comment?.author_association) && String(comment?.body ?? "").split(/\r?\n/).some((line) => line.trim() === command);
+	return comment.created && trustedAssociations.includes(String(comment.association)) && typeof comment.body === "string" && comment.body.split(/\r?\n/).some((line) => line.trim() === command);
 }
-function skip(reason) {
-	info(`Review roulette skipped: ${reason}`);
-	setOutput("skipped", true);
-}
-async function main() {
+async function main(host) {
 	let token = "";
+	const skip = (reason) => {
+		host.info(`Review roulette skipped: ${reason}`);
+		host.output("skipped", true);
+	};
 	try {
-		token = getInput("token").trim();
-		if (token) setSecret(token);
+		token = host.input("token").trim();
+		if (token) host.secret(token);
 		const options = parseOptions({
 			token,
-			...Object.fromEntries(inputNames.map((name) => [name, getInput(name)]))
+			...Object.fromEntries(inputNames.map((name) => [name, host.input(name)]))
 		});
-		if (!commandRequested(options.command)) return skip("the comment is not the command from a repository collaborator");
-		const result = await run(options, targetFromPayload(), new GitHubClient(token));
+		const event = host.event();
+		if (event.skip) return skip(event.skip);
+		if (!commandRequested(options.command, event.comment)) return skip("the comment is not the command from a repository collaborator");
+		const result = await run(options, resolveTarget(event), new GitHubClient(token));
 		const [first] = result.picks;
 		if (!first) return skip("the required label is missing");
-		setOutput("skipped", false);
-		setOutput("reviewer", first.reviewer);
-		setOutput("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
-		setOutput("review-count", first.reviewCount);
-		setOutput("issue-load", first.issueLoad ?? "");
-		setOutput("workload", first.workload);
-		setOutput("assigned", result.assigned);
+		host.output("skipped", false);
+		host.output("reviewer", first.reviewer);
+		host.output("reviewers", [...new Set(result.picks.map((pick) => pick.reviewer))].join(","));
+		host.output("review-count", first.reviewCount);
+		host.output("issue-load", first.issueLoad ?? "");
+		host.output("workload", first.workload);
+		host.output("assigned", result.assigned);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "Review roulette failed";
-		setFailed(token ? message.replaceAll(token, "***") : message);
+		host.fail(token ? message.replaceAll(token, "***") : message);
 	}
 }
 // src/index.ts
-await main();
+await main(detectHost());
 export {};

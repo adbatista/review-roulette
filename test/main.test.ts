@@ -34,7 +34,10 @@ vi.mock("@actions/core", () => ({
 vi.mock("@actions/github", () => ({ context: doubles.context }));
 vi.mock("../src/github", () => ({ GitHubClient: doubles.create }));
 vi.mock("../src/run", () => ({ run: doubles.run }));
-import { main } from "../src/main";
+import { main as runMain } from "../src/main";
+import { actionsHost } from "../src/hosts/actions";
+import type { Host } from "../src/host";
+const main = () => runMain(actionsHost());
 beforeEach(() => {
   vi.clearAllMocks();
   doubles.run.mockResolvedValue({
@@ -192,4 +195,55 @@ it("reports a skip when the run makes no pick", async () => {
   await main();
   expect(doubles.setOutput.mock.calls).toEqual([["skipped", true]]);
   expect(doubles.info.mock.calls[0][0]).toMatch(/required label/);
+});
+function fakeHost(event: ReturnType<Host["event"]>, inputs: Record<string, string> = {}) {
+  const calls: unknown[][] = [];
+  const record =
+    (kind: string) =>
+    (...values: unknown[]) => {
+      calls.push([kind, ...values]);
+    };
+  const host: Host = {
+    input: (name) => ({ token: "secret", reviewers: "Alice", ...inputs })[name] ?? "",
+    event: () => event,
+    secret: record("secret"),
+    info: record("info"),
+    output: record("output"),
+    fail: record("fail"),
+  };
+  return { host, calls };
+}
+it("runs for any host that supplies a target", async () => {
+  const { host, calls } = fakeHost({
+    target: { owner: "acme", repo: "mono", number: 5, kind: "pull" },
+  });
+  await runMain(host);
+  expect(doubles.run.mock.calls.at(-1)?.[1]).toEqual({
+    owner: "acme",
+    repo: "mono",
+    pullNumber: 5,
+    kind: "pull",
+  });
+  expect(calls[0]).toEqual(["secret", "secret"]);
+  expect(calls).toContainEqual(["output", "reviewer", "Alice"]);
+});
+it("skips when the host reports nothing to act on", async () => {
+  const { host, calls } = fakeHost({ skip: "not a pull-request build" });
+  await runMain(host);
+  expect(doubles.create).not.toHaveBeenCalled();
+  expect(calls.slice(1)).toEqual([
+    ["info", "Review roulette skipped: not a pull-request build"],
+    ["output", "skipped", true],
+  ]);
+});
+it.each([
+  { owner: "acme", repo: "mono", number: undefined, kind: "pull" as const },
+  { owner: "acme", repo: undefined, number: 5, kind: "pull" as const },
+  { owner: "bad owner", repo: "mono", number: 5, kind: "pull" as const },
+  { owner: "acme", repo: "mono", number: 0, kind: "pull" as const },
+])("fails through the host for an invalid target %j", async (target) => {
+  const { host, calls } = fakeHost({ target });
+  await runMain(host);
+  expect(calls.at(-1)?.[0]).toBe("fail");
+  expect(doubles.create).not.toHaveBeenCalled();
 });

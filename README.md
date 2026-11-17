@@ -161,6 +161,65 @@ jobs:
 
 `issue_comment` workflows run from the default branch with a write-capable token even when the comment is on a fork's pull request, so never check out or execute PR-head code in them.
 
+## Running on Semaphore
+
+The same bundle runs outside GitHub Actions. On Semaphore it reads its settings from environment variables and targets the pull request of the current build. The repository must be hosted on GitHub.
+
+```yaml
+blocks:
+  - name: Review roulette
+    task:
+      secrets:
+        - name: review-roulette # provides ROULETTE_TOKEN
+      env_vars:
+        - name: ROULETTE_REVIEWERS
+          value: alice, bob, carol
+        - name: ROULETTE_ASSIGN_REVIEWER
+          value: "true"
+      jobs:
+        - name: Suggest reviewer
+          commands:
+            - sem-version node 24
+            - git clone https://github.com/OWNER/review-roulette.git /tmp/review-roulette
+            - git -C /tmp/review-roulette checkout <commit-sha>
+            - node /tmp/review-roulette/dist/index.js
+```
+
+Semaphore has no built-in GitHub token, so store a PAT or GitHub App token in a secret as `ROULETTE_TOKEN` (`GITHUB_TOKEN` is used as a fallback). It needs the same access described above.
+
+### Configuration
+
+Every input is set through `ROULETTE_<INPUT>`, the input name upper-cased with `-` as `_`: `ROULETTE_REVIEWERS`, `ROULETTE_ISSUE_REPOSITORIES`, `ROULETTE_STATUS_WEIGHTS`, `ROULETTE_PROJECTS`, `ROULETTE_CODEOWNERS`, `ROULETTE_REQUIRED_LABEL` and so on.
+
+Longer settings can live in a JSON file named by `ROULETTE_CONFIG`. Keys are the input names; lists may be arrays and `status-weights` may be an object. An environment variable overrides the same key in the file. Keep the token out of the file.
+
+```json
+{
+  "reviewers": ["alice", "bob", "carol"],
+  "assign-reviewer": true,
+  "issue-repositories": ["acme/tasks"],
+  "status-weights": { "In progress": 3, "Done": 0 },
+  "projects": ["web | packages/web/** | alice, bob", "api | services/api/** | carol"]
+}
+```
+
+| Variable               | Default                   | Meaning                                                                                                |
+| ---------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `ROULETTE_HOST`        | Detected                  | `actions` or `semaphore`. Detection picks `actions` when `GITHUB_ACTIONS=true`, otherwise `semaphore`. |
+| `ROULETTE_CONFIG`      | Unset                     | Path to the JSON settings file.                                                                        |
+| `ROULETTE_REPOSITORY`  | `SEMAPHORE_GIT_REPO_SLUG` | Target `owner/repo`.                                                                                   |
+| `ROULETTE_NUMBER`      | `SEMAPHORE_GIT_PR_NUMBER` | Target pull request or issue number.                                                                   |
+| `ROULETTE_KIND`        | `pull`                    | `pull` or `issue`.                                                                                     |
+| `ROULETTE_OUTPUT_FILE` | Unset                     | File to which outputs are appended.                                                                    |
+
+- A build that is not for a pull request, with `ROULETTE_NUMBER` unset, is skipped successfully, so the job can stay in a pipeline that also runs on branches.
+- For fork pull requests the target is the project's repository, never the fork.
+- Outputs are logged as `ROULETTE_REVIEWER=alice`, `ROULETTE_REVIEW_COUNT=2` and so on. With `ROULETTE_OUTPUT_FILE` they are also appended to that file, which later commands can `source`.
+- Semaphore does not run pipelines for comments or issue events, so `command` does not apply. To run on an issue or on demand, start a pipeline through a Semaphore Task or the API with `ROULETTE_NUMBER` (and `ROULETTE_KIND=issue`) as parameters.
+- `GITHUB_API_URL` selects a GitHub Enterprise Server API.
+
+Because the adapter only reads environment variables, `ROULETTE_HOST=semaphore` with `ROULETTE_REPOSITORY` and `ROULETTE_NUMBER` also works on other CI systems.
+
 ## Fork pull requests
 
 Fork `pull_request` workflows commonly receive read-only tokens, so comment/review-request writes can fail. For forks, use a metadata-only `pull_request_target` workflow:
