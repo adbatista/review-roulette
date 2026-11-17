@@ -1,0 +1,15 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+if Gem::Version.new(RUBY_VERSION) < Gem::Version.new("3.3")
+  abort("Review roulette failed: Ruby 3.3 or newer is required, found #{RUBY_VERSION}")
+end
+
+require_relative "../lib/review_roulette"
+
+begin
+  host = ReviewRoulette::Host.detect
+rescue ReviewRoulette::Error => e
+  abort("Review roulette failed: #{e.message}")
+end
+exit ReviewRoulette::CLI.new(host).call

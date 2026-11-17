@@ -1,5 +1,5 @@
 name: Reviewer Auto Suggest
-description: Suggest the least-loaded reviewer and optionally request their review.
+description: Suggest the least-loaded reviewer for a pull request or assignee for an issue, and optionally request or assign them.
 author: Allure Team
 branding:
   icon: check-circle
@@ -18,14 +18,66 @@ inputs:
   assign-reviewer:
     description: Request the selected review in addition to posting a suggestion.
     default: "false"
+  issue-repositories:
+    description: Comma- or newline-separated owners or owner/repo names whose open issues assigned to a reviewer add to their workload.
+    default: ""
+  status-field:
+    description: Name of the single-select project field read as an issue's status.
+    default: Status
+  status-weights:
+    description: "One `Status name: weight` per line; `*` sets the weight of any other or missing status (default 1). Empty counts every assigned issue as 1 without reading projects."
+    default: ""
+  projects:
+    description: "One `name | patterns | owners` per line. Patterns are comma-separated globs, optionally `owner/repo:glob`. A project matches a PR that changes a matching file or carries a label equal to its name; each matched project gets its own pick."
+    default: ""
+  codeowners:
+    description: Also pick among the CODEOWNERS of the changed files.
+    default: "false"
+  command:
+    description: Comment line that triggers the action on issue_comment events, such as /roulette. Only repository owners, members and collaborators can trigger it. Required for issue_comment events.
+    default: ""
+  required-label:
+    description: Run only when the pull request or issue carries this label.
+    default: ""
 outputs:
+  skipped:
+    description: Whether the run was skipped because the command or required label was missing.
+    value: ${{ steps.roulette.outputs.skipped }}
   reviewer:
-    description: Selected reviewer login.
+    description: Selected reviewer login; the first category's pick when several are made.
+    value: ${{ steps.roulette.outputs.reviewer }}
+  reviewers:
+    description: Comma-separated unique logins selected across all categories.
+    value: ${{ steps.roulette.outputs.reviewers }}
   review-count:
     description: Outstanding review requests at selection time, before any new request.
+    value: ${{ steps.roulette.outputs.review-count }}
+  issue-load:
+    description: Weighted open issues assigned to the selected reviewer; empty without issue-repositories.
+    value: ${{ steps.roulette.outputs.issue-load }}
+  workload:
+    description: Review requests plus issue load, the number used for selection.
+    value: ${{ steps.roulette.outputs.workload }}
   assigned:
     description: Whether this run successfully created a review request.
+    value: ${{ steps.roulette.outputs.assigned }}
 
 runs:
-  using: node24
-  main: dist/index.js
+  using: composite
+  steps:
+    - id: roulette
+      shell: bash
+      env:
+        ROULETTE_HOST: actions
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_REVIEWERS: ${{ inputs.reviewers }}
+        INPUT_ORGANIZATIONS: ${{ inputs.organizations }}
+        INPUT_ASSIGN_REVIEWER: ${{ inputs.assign-reviewer }}
+        INPUT_ISSUE_REPOSITORIES: ${{ inputs.issue-repositories }}
+        INPUT_STATUS_FIELD: ${{ inputs.status-field }}
+        INPUT_STATUS_WEIGHTS: ${{ inputs.status-weights }}
+        INPUT_PROJECTS: ${{ inputs.projects }}
+        INPUT_CODEOWNERS: ${{ inputs.codeowners }}
+        INPUT_COMMAND: ${{ inputs.command }}
+        INPUT_REQUIRED_LABEL: ${{ inputs.required-label }}
+      run: ruby "$GITHUB_ACTION_PATH/bin/review-roulette"

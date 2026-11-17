@@ -1,4 +1,4 @@
-node_modules/
-coverage/
+.bundle/
+vendor/bundle/
 .superpowers/
-.yarn/
+.build/
