@@ -46,6 +46,8 @@ Both modes write a PR conversation comment and need `pull-requests: write`. Assi
 | `issue-repositories` | Empty                 | Owners or `owner/repo` names whose open issues assigned to a reviewer add to their workload.            |
 | `status-field`       | `Status`              | Single-select project field read as an issue's status.                                                  |
 | `status-weights`     | Empty                 | One `Status name: weight` per line. Empty counts every assigned issue as 1.                             |
+| `projects`           | Empty                 | One `name \| patterns \| owners` per line; each matched project gets its own pick.                      |
+| `codeowners`         | `false`               | Also pick among the `CODEOWNERS` of the changed files.                                                  |
 
 Lists are trimmed, validated, and deduplicated case-insensitively. Boolean inputs accept only `true` or `false`.
 
@@ -98,6 +100,35 @@ Each candidate's workload becomes their pending review requests **plus** their i
 
 Reading project status needs a token that can read the projects: a classic PAT with `read:project`, or a GitHub App with organization **Projects: read**. `GITHUB_TOKEN` cannot read organization projects or other repositories. A status that cannot be read fails the run instead of lowering the load.
 
+### Projects and owners
+
+```yaml
+- uses: OWNER/review-roulette@<commit-sha>
+  with:
+    reviewers: alice, bob, carol
+    projects: |
+      web      | packages/web/**, packages/ui/** | alice, bob
+      api      | acme/mono:services/api/**       | carol, dave
+      docs     | acme/docs:                      | erin
+      security |                                 | frank, grace
+    codeowners: "true"
+```
+
+Each line is `name | patterns | owners`. A project matches the PR when a changed file matches one of its patterns, or when the PR carries a label equal to the project name. Every matched project gets its own row and its own least-loaded pick among its owners.
+
+| Pattern                             | Matches                                               |
+| ----------------------------------- | ----------------------------------------------------- |
+| `packages/web/**` or `packages/web` | That folder, in whichever repository the action runs. |
+| `acme/mono:services/api/**`         | That folder, only in `acme/mono`.                     |
+| `acme/docs:`                        | Every PR in `acme/docs`.                              |
+| (empty)                             | Nothing by path; the project matches by label only.   |
+
+Globs support `*` (within one path segment), `**` (across segments) and `?`. The same `projects` value can be shared across repositories, for example through an organization variable.
+
+With `codeowners: "true"`, the action reads `CODEOWNERS` from the PR's base branch (`.github/`, the root, then `docs/`) and adds a `Code owners` row picked among the owners of the changed files. Teams are expanded to their members and email owners are ignored. This needs `contents: read`, and team owners need a token that can read the organization's team members, which `GITHUB_TOKEN` cannot.
+
+When no project or code owner applies, or the PR author is the only owner, the action falls back to `reviewers` (or GitHub's suggestions) in a single `All` row. The same person can be picked for several rows and is requested once.
+
 ## Fork pull requests
 
 Fork `pull_request` workflows commonly receive read-only tokens, so comment/review-request writes can fail. For forks, use a metadata-only `pull_request_target` workflow:
@@ -126,17 +157,19 @@ jobs:
 
 ## Comment and outputs
 
-The comment shows only the selected reviewer:
+The comment shows one selected reviewer per category:
 
-| Category | Suggested reviewer                 |
-| -------- | ---------------------------------- |
-| All      | @alice — 2 pending review requests |
+| Category | Suggested reviewer                 | Status           |
+| -------- | ---------------------------------- | ---------------- |
+| web      | @alice — 2 pending review requests | Review requested |
+| api      | @carol — 0 pending review requests | Suggestion only  |
 
-A status sentence says suggestion-only, review requested, or review already requested. The count is captured **before** a new request in that run.
+The status says suggestion-only, review requested, or review already requested. The count is captured **before** a new request in that run.
 
 | Output         | Meaning                                                                                |
 | -------------- | -------------------------------------------------------------------------------------- |
-| `reviewer`     | Selected login.                                                                        |
+| `reviewer`     | Selected login; the first category's pick when several are made.                       |
+| `reviewers`    | Comma-separated unique logins selected across all categories.                          |
 | `review-count` | Outstanding request count at selection time.                                           |
 | `issue-load`   | Weighted assigned issues of the selected reviewer; empty without `issue-repositories`. |
 | `workload`     | Request count plus issue load, the number used for selection.                          |
@@ -147,6 +180,8 @@ Outputs are published only after successful comment publication. API failures fa
 ### Reruns
 
 The action updates its earliest valid, identity-owned managed comment. A copied marker in someone else's comment is not editable. Preserve its hidden marker to retain selection history.
+
+Each category remembers its own pick:
 
 - Keep a prior selected reviewer who is still in the current candidate pool, is not the author, and has an outstanding request on this PR—even if their count is now higher.
 - Otherwise retain a prior suggestion only while it shares the minimum count.
