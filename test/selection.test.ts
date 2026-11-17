@@ -8,7 +8,7 @@ const counts = new Map([
 it("excludes the author case insensitively and picks minimum", () => {
   expect(
     selectReviewer(["Alice", "Bob", "Carol"], "ALICE", counts, [], undefined, () => 0),
-  ).toEqual({ reviewer: "Carol", reviewCount: 1 });
+  ).toEqual({ reviewer: "Carol", workload: 1 });
 });
 it("uses randomness only among minimum ties", () => {
   expect(

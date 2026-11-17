@@ -18,11 +18,24 @@ inputs:
   assign-reviewer:
     description: Request the selected review in addition to posting a suggestion.
     default: "false"
+  issue-repositories:
+    description: Comma- or newline-separated owners or owner/repo names whose open issues assigned to a reviewer add to their workload.
+    default: ""
+  status-field:
+    description: Name of the single-select project field read as an issue's status.
+    default: Status
+  status-weights:
+    description: "One `Status name: weight` per line; `*` sets the weight of any other or missing status (default 1). Empty counts every assigned issue as 1 without reading projects."
+    default: ""
 outputs:
   reviewer:
     description: Selected reviewer login.
   review-count:
     description: Outstanding review requests at selection time, before any new request.
+  issue-load:
+    description: Weighted open issues assigned to the selected reviewer; empty without issue-repositories.
+  workload:
+    description: Review requests plus issue load, the number used for selection.
   assigned:
     description: Whether this run successfully created a review request.
 

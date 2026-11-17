@@ -12,6 +12,9 @@ describe("parseOptions", () => {
       reviewers: ["Alice", "Bob"],
       organizations: ["Acme", "Other"],
       assignReviewer: false,
+      issueRepositories: [],
+      statusField: "Status",
+      statusWeights: new Map(),
     });
   });
   it("accepts empty organization scope and explicit assignment", () => {
@@ -23,6 +26,21 @@ describe("parseOptions", () => {
     });
     expect(result.organizations).toEqual([]);
     expect(result.assignReviewer).toBe(true);
+  });
+  it("parses issue workload scopes and status weights", () => {
+    const result = parseOptions({
+      token: "secret",
+      "issue-repositories": "acme/tasks, Acme/Tasks\nother",
+      "status-field": " Stage ",
+      "status-weights": "In progress: 3\n\nReview: now: 2\n*: 0",
+    });
+    expect(result.issueRepositories).toEqual(["acme/tasks", "other"]);
+    expect(result.statusField).toBe("Stage");
+    expect([...result.statusWeights]).toEqual([
+      ["in progress", 3],
+      ["review: now", 2],
+      ["*", 0],
+    ]);
   });
   it.each([undefined, "", " , \n"])(
     "uses discovery for missing or empty reviewers %j",
@@ -41,6 +59,12 @@ describe("parseOptions", () => {
     { token: "s", reviewers: "-alice" },
     { token: "s", reviewers: "a", organizations: "bad org" },
     { token: "s", reviewers: "a", "assign-reviewer": "yes" },
+    { token: "s", "issue-repositories": "acme/tasks/extra" },
+    { token: "s", "issue-repositories": "acme/bad repo" },
+    { token: "s", "status-weights": "Todo" },
+    { token: "s", "status-weights": "Todo: -1" },
+    { token: "s", "status-weights": "Todo: 1.5" },
+    { token: "s", "status-weights": ": 1" },
   ])("rejects invalid inputs %j", (raw) => {
     expect(() => parseOptions(raw)).toThrow();
   });

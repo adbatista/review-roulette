@@ -1,4 +1,4 @@
-import type { Suggestion } from "./model";
+import type { Selection } from "./model";
 export function selectReviewer(
   reviewers: string[],
   author: string,
@@ -6,28 +6,28 @@ export function selectReviewer(
   requestedReviewers: string[],
   previousReviewer: string | undefined,
   random: () => number,
-): Suggestion {
+): Selection {
   const normalized = new Map([...counts].map(([login, count]) => [login.toLowerCase(), count]));
   const candidates = reviewers
     .filter((login) => login.toLowerCase() !== author.toLowerCase())
     .map((reviewer) => {
-      const reviewCount = normalized.get(reviewer.toLowerCase());
-      if (reviewCount === undefined || !Number.isSafeInteger(reviewCount) || reviewCount < 0)
+      const workload = normalized.get(reviewer.toLowerCase());
+      if (workload === undefined || !Number.isSafeInteger(workload) || workload < 0)
         throw new Error("Invalid or missing reviewer workload count");
-      return { reviewer, reviewCount };
+      return { reviewer, workload };
     });
   if (!candidates.length)
     throw new Error("No eligible reviewers remain after excluding the PR author");
-  const minimum = Math.min(...candidates.map((candidate) => candidate.reviewCount));
+  const minimum = Math.min(...candidates.map((candidate) => candidate.workload));
   const previous = candidates.find(
     (candidate) => candidate.reviewer.toLowerCase() === previousReviewer?.toLowerCase(),
   );
   if (
     previous &&
-    (previous.reviewCount === minimum ||
+    (previous.workload === minimum ||
       requestedReviewers.some((login) => login.toLowerCase() === previous.reviewer.toLowerCase()))
   )
     return previous;
-  const tied = candidates.filter((candidate) => candidate.reviewCount === minimum);
+  const tied = candidates.filter((candidate) => candidate.workload === minimum);
   return tied[Math.floor(random() * tied.length)];
 }

@@ -12,6 +12,17 @@ interface ApiFailure {
   response?: { headers?: Record<string, string> };
 }
 
+interface IssuePage {
+  pageInfo: { hasNextPage: boolean; endCursor: string | null } | null;
+  nodes:
+    | ({
+        projectItems?: {
+          nodes: ({ isArchived: boolean; fieldValueByName: { name?: string } | null } | null)[];
+        } | null;
+      } | null)[]
+    | null;
+}
+
 const unique = (values: string[]) =>
   values.filter(
     (value, index) =>
@@ -32,7 +43,7 @@ export class GitHubClient {
     this.now = runtime.now ?? Date.now;
   }
 
-  public async checkAccess(target: Target, organizations: string[]) {
+  public async checkAccess(target: Target, organizations: string[], issueScopes: string[] = []) {
     const data = await this.retry(() =>
       this.octokit.graphql<{
         repository: { nameWithOwner: string } | null;
@@ -57,6 +68,26 @@ export class GitHubClient {
       );
       if (scope.organization?.login.toLowerCase() !== login.toLowerCase())
         throw new Error("Configured organization is inaccessible or mismatched");
+    }
+    for (const scope of unique(issueScopes)) {
+      const [owner, name] = scope.split("/");
+      const found = await this.retry(() =>
+        name
+          ? this.octokit
+              .graphql<{ repository: { nameWithOwner: string } | null }>(
+                "query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { nameWithOwner } }",
+                { owner, repo: name },
+              )
+              .then((result) => result.repository?.nameWithOwner)
+          : this.octokit
+              .graphql<{ repositoryOwner: { login: string } | null }>(
+                "query($login: String!) { repositoryOwner(login: $login) { login } }",
+                { login: owner },
+              )
+              .then((result) => result.repositoryOwner?.login),
+      );
+      if (found?.toLowerCase() !== scope.toLowerCase())
+        throw new Error("Configured issue repository is inaccessible or mismatched");
     }
     return { login: data.viewer.login };
   }
@@ -103,13 +134,60 @@ export class GitHubClient {
     const scopes = organizations.length
       ? unique(organizations).map((org) => `org:${org}`)
       : [`repo:${target.owner}/${target.repo}`];
-    const counts = new Map(unique(reviewers).map((login) => [login.toLowerCase(), 0]));
+    return this.countSearches(
+      unique(reviewers).flatMap((login) =>
+        scopes.map((scope) => ({
+          login,
+          query: `is:pr is:open ${scope} review-requested:${login}`,
+        })),
+      ),
+    );
+  }
+
+  public async getIssueLoads(
+    scopes: string[],
+    reviewers: string[],
+    statusField: string,
+    weights: ReadonlyMap<string, number>,
+  ) {
     const searches = unique(reviewers).flatMap((login) =>
-      scopes.map((scope) => ({
+      unique(scopes).map((scope) => ({
         login,
-        query: `is:pr is:open ${scope} review-requested:${login}`,
+        query: `is:issue is:open ${scope.includes("/") ? "repo" : "org"}:${scope} assignee:${login}`,
       })),
     );
+    if (!weights.size) return this.countSearches(searches);
+    const fallback = weights.get("*") ?? 1;
+    const loads = new Map(searches.map((search) => [search.login.toLowerCase(), 0]));
+    for (const search of searches) {
+      for (let after: string | null = null; ;) {
+        const page = await this.retry(() =>
+          this.octokit.graphql<{ search: IssuePage | null }>(
+            "query($q: String!, $field: String!, $after: String) { search(type: ISSUE, first: 100, query: $q, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Issue { projectItems(first: 20) { nodes { isArchived fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } } }",
+            { q: search.query, field: statusField, after },
+          ),
+        );
+        if (!page.search?.nodes || !page.search.pageInfo)
+          throw new Error("GitHub returned a missing or invalid issue workload");
+        const login = search.login.toLowerCase();
+        for (const issue of page.search.nodes) {
+          const statuses = (issue?.projectItems?.nodes ?? [])
+            .filter((item) => item && !item.isArchived && item.fieldValueByName?.name)
+            .map((item) => weights.get(item!.fieldValueByName!.name!.toLowerCase()) ?? fallback);
+          loads.set(
+            login,
+            loads.get(login)! + (statuses.length ? Math.max(...statuses) : fallback),
+          );
+        }
+        if (!page.search.pageInfo.hasNextPage || !page.search.pageInfo.endCursor) break;
+        after = page.search.pageInfo.endCursor;
+      }
+    }
+    return loads;
+  }
+
+  private async countSearches(searches: { login: string; query: string }[]) {
+    const counts = new Map(searches.map((search) => [search.login.toLowerCase(), 0]));
     for (let offset = 0; offset < searches.length; offset += 20) {
       const batch = searches.slice(offset, offset + 20);
       const variables = Object.fromEntries(batch.map((item, i) => [`q${i}`, item.query]));

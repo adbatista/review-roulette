@@ -35,7 +35,12 @@ vi.mock("../src/run", () => ({ run: doubles.run }));
 import { main } from "../src/main";
 beforeEach(() => {
   vi.clearAllMocks();
-  doubles.run.mockResolvedValue({ reviewer: "Alice", reviewCount: 3, assigned: false });
+  doubles.run.mockResolvedValue({
+    reviewer: "Alice",
+    reviewCount: 3,
+    workload: 3,
+    assigned: false,
+  });
 });
 it.each(["pull_request", "pull_request_target"])(
   "uses base repo and publishes outputs for %s",
@@ -50,11 +55,34 @@ it.each(["pull_request", "pull_request_target"])(
     expect(doubles.setOutput.mock.calls).toEqual([
       ["reviewer", "Alice"],
       ["review-count", 3],
+      ["issue-load", ""],
+      ["workload", 3],
       ["assigned", false],
     ]);
     expect(doubles.setSecret).toHaveBeenCalledWith("secret");
   },
 );
+it("passes issue workload inputs through and publishes the issue load", async () => {
+  doubles.inputs["issue-repositories"] = "acme/tasks";
+  doubles.inputs["status-weights"] = "Done: 0";
+  doubles.run.mockResolvedValue({
+    reviewer: "Alice",
+    reviewCount: 3,
+    issueLoad: 2,
+    workload: 5,
+    assigned: false,
+  });
+  await main();
+  delete doubles.inputs["issue-repositories"];
+  delete doubles.inputs["status-weights"];
+  expect(doubles.run.mock.calls.at(-1)?.[0]).toMatchObject({
+    issueRepositories: ["acme/tasks"],
+    statusField: "Status",
+    statusWeights: new Map([["done", 0]]),
+  });
+  expect(doubles.setOutput).toHaveBeenCalledWith("issue-load", 2);
+  expect(doubles.setOutput).toHaveBeenCalledWith("workload", 5);
+});
 it("fails before API work without PR context", async () => {
   const payload = doubles.context.payload;
   doubles.context.payload = {};

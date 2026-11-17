@@ -62,6 +62,122 @@ describe("access", () => {
     expect(await api.checkAccess(target, [])).toEqual({ login: "alice" });
   });
 });
+describe("issue scopes", () => {
+  it("verifies issue repositories and owners", async () => {
+    const { api, calls } = harness([
+      { body: { data: access } },
+      { body: { data: { repository: { nameWithOwner: "Acme/Tasks" } } } },
+      { body: { data: { repositoryOwner: { login: "Other" } } } },
+    ]);
+    await api.checkAccess(target, [], ["acme/tasks", "ACME/TASKS", "other"]);
+    expect(calls).toHaveLength(3);
+    expect(calls[1].body.variables).toEqual({ owner: "acme", repo: "tasks" });
+    expect(calls[2].body.variables).toEqual({ login: "other" });
+  });
+  it.each([
+    ["acme/tasks", { repository: null }],
+    ["acme/tasks", { repository: { nameWithOwner: "acme/renamed" } }],
+    ["other", { repositoryOwner: null }],
+  ])("rejects inaccessible issue scope %s %j", async (scope, data) => {
+    const { api } = harness([{ body: { data: access } }, { body: { data } }]);
+    await expect(api.checkAccess(target, [], [scope])).rejects.toThrow(/issue repository/i);
+  });
+});
+describe("issue loads", () => {
+  const item = (name: string | null, isArchived = false) => ({
+    isArchived,
+    fieldValueByName: name === null ? null : { name },
+  });
+  const issue = (...items: unknown[]) => ({ projectItems: { nodes: items } });
+  const page = (nodes: unknown[], endCursor: string | null = null) => ({
+    body: {
+      data: { search: { pageInfo: { hasNextPage: endCursor !== null, endCursor }, nodes } },
+    },
+  });
+  it("counts assigned open issues per repository or owner without reading projects", async () => {
+    const { api, calls } = harness([
+      {
+        body: {
+          data: {
+            q0: { issueCount: 2 },
+            q1: { issueCount: 3 },
+            q2: { issueCount: 0 },
+            q3: { issueCount: 0 },
+          },
+        },
+      },
+    ]);
+    const loads = await api.getIssueLoads(
+      ["acme/tasks", "other"],
+      ["Alice", "alice", "Bob"],
+      "Status",
+      new Map(),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body.variables).toMatchObject({
+      q0: "is:issue is:open repo:acme/tasks assignee:Alice",
+      q1: "is:issue is:open org:other assignee:Alice",
+    });
+    expect(calls[0].body.query).not.toContain("projectItems");
+    expect([...loads]).toEqual([
+      ["alice", 5],
+      ["bob", 0],
+    ]);
+  });
+  it("weighs each issue by its heaviest live project status across pages", async () => {
+    const { api, calls } = harness([
+      page(
+        [
+          issue(item("In Progress"), item("Done")),
+          issue(item("Done")),
+          issue(item("In progress", true)),
+        ],
+        "cursor-1",
+      ),
+      page([issue(), issue(item(null)), issue(item("Unknown")), null]),
+    ]);
+    const loads = await api.getIssueLoads(
+      ["acme/tasks"],
+      ["Alice"],
+      "Stage",
+      new Map([
+        ["in progress", 3],
+        ["done", 0],
+        ["*", 2],
+      ]),
+    );
+    expect(loads.get("alice")).toBe(3 + 0 + 2 + 2 + 2 + 2 + 2);
+    expect(calls[0].body.variables).toEqual({
+      q: "is:issue is:open repo:acme/tasks assignee:Alice",
+      field: "Stage",
+      after: null,
+    });
+    expect(calls[1].body.variables).toMatchObject({ after: "cursor-1" });
+    expect(calls[0].body.query).toContain("fieldValueByName(name: $field)");
+  });
+  it("defaults unlisted statuses to weight 1", async () => {
+    const { api } = harness([page([issue(item("Todo")), issue(item("Done"))])]);
+    const loads = await api.getIssueLoads(["acme"], ["Alice"], "Status", new Map([["done", 0]]));
+    expect(loads.get("alice")).toBe(1);
+  });
+  it.each([{ search: null }, { search: { pageInfo: null, nodes: [] } }])(
+    "rejects malformed issue pages %j",
+    async (data) => {
+      const { api } = harness([{ body: { data } }]);
+      await expect(
+        api.getIssueLoads(["acme"], ["Alice"], "Status", new Map([["done", 0]])),
+      ).rejects.toThrow(/issue workload/);
+    },
+  );
+  it("fails when projects cannot be read instead of undercounting", async () => {
+    const { api } = harness([
+      { body: { data: { search: null }, errors: [{ message: "INSUFFICIENT_SCOPES" }] } },
+    ]);
+    await expect(
+      api.getIssueLoads(["acme"], ["Alice"], "Status", new Map([["done", 0]])),
+    ).rejects.toThrow();
+  });
+});
 describe("suggested reviewers", () => {
   it("fetches native PR suggestions and deduplicates logins", async () => {
     const { api, calls } = harness([

@@ -1,6 +1,13 @@
 import { loginPattern } from "./inputs";
 import type { AssignmentStatus, CommentIdentity, ManagedComment, Suggestion } from "./model";
 
+function describeWorkload(suggestion: Suggestion): string {
+  const reviews = `${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"}`;
+  return suggestion.issueLoad === undefined
+    ? reviews
+    : `${reviews}, assigned issue load ${suggestion.issueLoad}`;
+}
+
 export function renderComment(suggestion: Suggestion, status: AssignmentStatus): string {
   const copy = {
     suggested: "Suggestion only; no review request was created.",
@@ -11,7 +18,7 @@ export function renderComment(suggestion: Suggestion, status: AssignmentStatus):
 
 | Category | Suggested reviewer |
 | --- | --- |
-| All | [@${suggestion.reviewer}](https://github.com/${suggestion.reviewer}) — ${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"} |
+| All | [@${suggestion.reviewer}](https://github.com/${suggestion.reviewer}) — ${describeWorkload(suggestion)} |
 
 ${copy[status]}
 

@@ -1,5 +1,6 @@
 import type { Options } from "./model";
 
+export const repositoryPattern = /^[\w.-]+$/;
 export const loginPattern = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
 
 function parseList(value: string, reviewer: boolean): string[] {
@@ -11,6 +12,37 @@ function parseList(value: string, reviewer: boolean): string[] {
     unique.set(login.toLowerCase(), unique.get(login.toLowerCase()) ?? login);
   }
   return [...unique.values()];
+}
+
+function parseScopes(value: string): string[] {
+  const unique = new Map<string, string>();
+  for (const entry of value.split(/[,\n]/)) {
+    const scope = entry.trim();
+    if (!scope) continue;
+    const [owner, repo, ...rest] = scope.split("/");
+    if (
+      rest.length ||
+      !loginPattern.test(owner) ||
+      (repo !== undefined && !repositoryPattern.test(repo))
+    )
+      throw new Error("issue-repositories entries must be an owner or owner/repo");
+    unique.set(scope.toLowerCase(), unique.get(scope.toLowerCase()) ?? scope);
+  }
+  return [...unique.values()];
+}
+
+function parseWeights(value: string): Map<string, number> {
+  const weights = new Map<string, number>();
+  for (const line of value.split("\n")) {
+    if (!line.trim()) continue;
+    const match = /^(.+):\s*(\d+)\s*$/.exec(line);
+    const name = match?.[1].trim().toLowerCase();
+    const weight = Number(match?.[2]);
+    if (!name || !Number.isSafeInteger(weight))
+      throw new Error("status-weights lines must look like `In progress: 2`");
+    weights.set(name, weight);
+  }
+  return weights;
 }
 
 export function parseOptions(raw: Record<string, string>): Options {
@@ -25,5 +57,8 @@ export function parseOptions(raw: Record<string, string>): Options {
     reviewers,
     organizations: parseList(raw.organizations ?? "", false),
     assignReviewer: assignment === "true",
+    issueRepositories: parseScopes(raw["issue-repositories"] ?? ""),
+    statusField: raw["status-field"]?.trim() || "Status",
+    statusWeights: parseWeights(raw["status-weights"] ?? ""),
   };
 }

@@ -20062,6 +20062,7 @@ function getOctokit(token, options, ...additionalPlugins) {
 	return new (GitHub.plugin(...additionalPlugins))(getOctokitOptions(token, options));
 }
 // src/inputs.ts
+const repositoryPattern = /^[\w.-]+$/;
 const loginPattern = /^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i;
 function parseList(value, reviewer) {
 	const unique = /* @__PURE__ */ new Map();
@@ -20073,6 +20074,29 @@ function parseList(value, reviewer) {
 	}
 	return [...unique.values()];
 }
+function parseScopes(value) {
+	const unique = /* @__PURE__ */ new Map();
+	for (const entry of value.split(/[,\n]/)) {
+		const scope = entry.trim();
+		if (!scope) continue;
+		const [owner, repo, ...rest] = scope.split("/");
+		if (rest.length || !loginPattern.test(owner) || repo !== void 0 && !repositoryPattern.test(repo)) throw new Error("issue-repositories entries must be an owner or owner/repo");
+		unique.set(scope.toLowerCase(), unique.get(scope.toLowerCase()) ?? scope);
+	}
+	return [...unique.values()];
+}
+function parseWeights(value) {
+	const weights = /* @__PURE__ */ new Map();
+	for (const line of value.split("\n")) {
+		if (!line.trim()) continue;
+		const match = /^(.+):\s*(\d+)\s*$/.exec(line);
+		const name = match?.[1].trim().toLowerCase();
+		const weight = Number(match?.[2]);
+		if (!name || !Number.isSafeInteger(weight)) throw new Error("status-weights lines must look like `In progress: 2`");
+		weights.set(name, weight);
+	}
+	return weights;
+}
 function parseOptions(raw) {
 	const token = (raw.token ?? "").trim();
 	if (!token) throw new Error("token is required");
@@ -20083,7 +20107,10 @@ function parseOptions(raw) {
 		token,
 		reviewers,
 		organizations: parseList(raw.organizations ?? "", false),
-		assignReviewer: assignment === "true"
+		assignReviewer: assignment === "true",
+		issueRepositories: parseScopes(raw["issue-repositories"] ?? ""),
+		statusField: raw["status-field"]?.trim() || "Status",
+		statusWeights: parseWeights(raw["status-weights"] ?? "")
 	};
 }
 // src/github.ts
@@ -20105,11 +20132,18 @@ var GitHubClient = class {
 		this.sleep = runtime.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 		this.now = runtime.now ?? Date.now;
 	}
-	async checkAccess(target, organizations) {
+	async checkAccess(target, organizations, issueScopes = []) {
 		const data = await this.retry(() => this.octokit.graphql("query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { nameWithOwner } viewer { login } }", this.params(target)));
 		if (data.repository?.nameWithOwner.toLowerCase() !== `${target.owner}/${target.repo}`.toLowerCase()) throw new Error("Target repository is inaccessible or mismatched");
 		if (!data.viewer?.login) throw new Error("Cannot resolve authenticated comment identity");
 		for (const login of unique(organizations)) if ((await this.retry(() => this.octokit.graphql("query($login: String!) { organization(login: $login) { login } }", { login }))).organization?.login.toLowerCase() !== login.toLowerCase()) throw new Error("Configured organization is inaccessible or mismatched");
+		for (const scope of unique(issueScopes)) {
+			const [owner, name] = scope.split("/");
+			if ((await this.retry(() => name ? this.octokit.graphql("query($owner: String!, $repo: String!) { repository(owner: $owner, name: $repo) { nameWithOwner } }", {
+				owner,
+				repo: name
+			}).then((result) => result.repository?.nameWithOwner) : this.octokit.graphql("query($login: String!) { repositoryOwner(login: $login) { login } }", { login: owner }).then((result) => result.repositoryOwner?.login)))?.toLowerCase() !== scope.toLowerCase()) throw new Error("Configured issue repository is inaccessible or mismatched");
+		}
 		return { login: data.viewer.login };
 	}
 	async getPull(target) {
@@ -20143,11 +20177,38 @@ var GitHubClient = class {
 	}
 	async getCounts(target, organizations, reviewers) {
 		const scopes = organizations.length ? unique(organizations).map((org) => `org:${org}`) : [`repo:${target.owner}/${target.repo}`];
-		const counts = new Map(unique(reviewers).map((login) => [login.toLowerCase(), 0]));
-		const searches = unique(reviewers).flatMap((login) => scopes.map((scope) => ({
+		return this.countSearches(unique(reviewers).flatMap((login) => scopes.map((scope) => ({
 			login,
 			query: `is:pr is:open ${scope} review-requested:${login}`
+		}))));
+	}
+	async getIssueLoads(scopes, reviewers, statusField, weights) {
+		const searches = unique(reviewers).flatMap((login) => unique(scopes).map((scope) => ({
+			login,
+			query: `is:issue is:open ${scope.includes("/") ? "repo" : "org"}:${scope} assignee:${login}`
 		})));
+		if (!weights.size) return this.countSearches(searches);
+		const fallback = weights.get("*") ?? 1;
+		const loads = new Map(searches.map((search) => [search.login.toLowerCase(), 0]));
+		for (const search of searches) for (let after = null;;) {
+			const page = await this.retry(() => this.octokit.graphql("query($q: String!, $field: String!, $after: String) { search(type: ISSUE, first: 100, query: $q, after: $after) { pageInfo { hasNextPage endCursor } nodes { ... on Issue { projectItems(first: 20) { nodes { isArchived fieldValueByName(name: $field) { ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } } }", {
+				q: search.query,
+				field: statusField,
+				after
+			}));
+			if (!page.search?.nodes || !page.search.pageInfo) throw new Error("GitHub returned a missing or invalid issue workload");
+			const login = search.login.toLowerCase();
+			for (const issue of page.search.nodes) {
+				const statuses = (issue?.projectItems?.nodes ?? []).filter((item) => item && !item.isArchived && item.fieldValueByName?.name).map((item) => weights.get(item.fieldValueByName.name.toLowerCase()) ?? fallback);
+				loads.set(login, loads.get(login) + (statuses.length ? Math.max(...statuses) : fallback));
+			}
+			if (!page.search.pageInfo.hasNextPage || !page.search.pageInfo.endCursor) break;
+			after = page.search.pageInfo.endCursor;
+		}
+		return loads;
+	}
+	async countSearches(searches) {
+		const counts = new Map(searches.map((search) => [search.login.toLowerCase(), 0]));
 		for (let offset = 0; offset < searches.length; offset += 20) {
 			const batch = searches.slice(offset, offset + 20);
 			const variables = Object.fromEntries(batch.map((item, i) => [`q${i}`, item.query]));
@@ -20226,12 +20287,16 @@ var GitHubClient = class {
 	}
 };
 // src/comment.ts
+function describeWorkload(suggestion) {
+	const reviews = `${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"}`;
+	return suggestion.issueLoad === void 0 ? reviews : `${reviews}, assigned issue load ${suggestion.issueLoad}`;
+}
 function renderComment(suggestion, status) {
 	return `### Review roulette
 
 | Category | Suggested reviewer |
 | --- | --- |
-| All | [@${suggestion.reviewer}](https://github.com/${suggestion.reviewer}) — ${suggestion.reviewCount} pending review request${suggestion.reviewCount === 1 ? "" : "s"} |
+| All | [@${suggestion.reviewer}](https://github.com/${suggestion.reviewer}) — ${describeWorkload(suggestion)} |
 
 ${{
 		suggested: "Suggestion only; no review request was created.",
@@ -20254,30 +20319,38 @@ function findManagedComment(comments, identity) {
 function selectReviewer(reviewers, author, counts, requestedReviewers, previousReviewer, random) {
 	const normalized = new Map([...counts].map(([login, count]) => [login.toLowerCase(), count]));
 	const candidates = reviewers.filter((login) => login.toLowerCase() !== author.toLowerCase()).map((reviewer) => {
-		const reviewCount = normalized.get(reviewer.toLowerCase());
-		if (reviewCount === void 0 || !Number.isSafeInteger(reviewCount) || reviewCount < 0) throw new Error("Invalid or missing reviewer workload count");
+		const workload = normalized.get(reviewer.toLowerCase());
+		if (workload === void 0 || !Number.isSafeInteger(workload) || workload < 0) throw new Error("Invalid or missing reviewer workload count");
 		return {
 			reviewer,
-			reviewCount
+			workload
 		};
 	});
 	if (!candidates.length) throw new Error("No eligible reviewers remain after excluding the PR author");
-	const minimum = Math.min(...candidates.map((candidate) => candidate.reviewCount));
+	const minimum = Math.min(...candidates.map((candidate) => candidate.workload));
 	const previous = candidates.find((candidate) => candidate.reviewer.toLowerCase() === previousReviewer?.toLowerCase());
-	if (previous && (previous.reviewCount === minimum || requestedReviewers.some((login) => login.toLowerCase() === previous.reviewer.toLowerCase()))) return previous;
-	const tied = candidates.filter((candidate) => candidate.reviewCount === minimum);
+	if (previous && (previous.workload === minimum || requestedReviewers.some((login) => login.toLowerCase() === previous.reviewer.toLowerCase()))) return previous;
+	const tied = candidates.filter((candidate) => candidate.workload === minimum);
 	return tied[Math.floor(random() * tied.length)];
 }
 // src/run.ts
 async function run(options, target, api, random = Math.random) {
-	const identity = await api.checkAccess(target, options.organizations);
+	const identity = await api.checkAccess(target, options.organizations, options.issueRepositories);
 	const pull = await api.getPull(target);
 	const eligible = (options.reviewers.length ? options.reviewers : await api.getSuggestedReviewers(target)).filter((login) => login.toLowerCase() !== pull.author.toLowerCase());
 	if (!eligible.length) throw new Error("No eligible reviewers remain after excluding the PR author");
 	const counts = await api.getCounts(target, options.organizations, eligible);
+	const issueLoads = options.issueRepositories.length ? await api.getIssueLoads(options.issueRepositories, eligible, options.statusField, options.statusWeights) : void 0;
+	const workloads = new Map([...counts].map(([login, count]) => [login, count + (issueLoads?.get(login) ?? 0)]));
 	const comment = findManagedComment(await api.listComments(target), identity);
-	const suggestion = selectReviewer(eligible, pull.author, counts, pull.requestedReviewers, comment ? readSuggestion(comment.body) : void 0, random);
-	const alreadyRequested = pull.requestedReviewers.some((login) => login.toLowerCase() === suggestion.reviewer.toLowerCase());
+	const selection = selectReviewer(eligible, pull.author, workloads, pull.requestedReviewers, comment ? readSuggestion(comment.body) : void 0, random);
+	const login = selection.reviewer.toLowerCase();
+	const suggestion = {
+		...selection,
+		reviewCount: counts.get(login),
+		...issueLoads ? { issueLoad: issueLoads.get(login) } : {}
+	};
+	const alreadyRequested = pull.requestedReviewers.some((requested) => requested.toLowerCase() === login);
 	let assigned = false;
 	let status = alreadyRequested ? "already-requested" : "suggested";
 	if (options.assignReviewer && !alreadyRequested) {
@@ -20299,7 +20372,7 @@ function targetFromPayload() {
 	const owner = pull?.base?.repo?.owner?.login;
 	const repo = pull?.base?.repo?.name;
 	const pullNumber = pull?.number;
-	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !/^[\w.-]+$/.test(repo) || typeof pullNumber !== "number" || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) throw new Error("A valid pull-request event context is required");
+	if (typeof owner !== "string" || !loginPattern.test(owner) || typeof repo !== "string" || !repositoryPattern.test(repo) || typeof pullNumber !== "number" || !Number.isSafeInteger(pullNumber) || pullNumber <= 0) throw new Error("A valid pull-request event context is required");
 	return {
 		owner,
 		repo,
@@ -20315,10 +20388,15 @@ async function main() {
 			token,
 			reviewers: getInput("reviewers"),
 			organizations: getInput("organizations"),
-			"assign-reviewer": getInput("assign-reviewer")
+			"assign-reviewer": getInput("assign-reviewer"),
+			"issue-repositories": getInput("issue-repositories"),
+			"status-field": getInput("status-field"),
+			"status-weights": getInput("status-weights")
 		}), targetFromPayload(), new GitHubClient(token));
 		setOutput("reviewer", result.reviewer);
 		setOutput("review-count", result.reviewCount);
+		setOutput("issue-load", result.issueLoad ?? "");
+		setOutput("workload", result.workload);
 		setOutput("assigned", result.assigned);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "Review roulette failed";

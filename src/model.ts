@@ -5,6 +5,9 @@ export interface Options {
   reviewers: string[];
   organizations: string[];
   assignReviewer: boolean;
+  issueRepositories: string[];
+  statusField: string;
+  statusWeights: Map<string, number>;
 }
 export interface Target {
   owner: string;
@@ -15,9 +18,13 @@ export interface PullSnapshot {
   author: string;
   requestedReviewers: string[];
 }
-export interface Suggestion {
+export interface Selection {
   reviewer: string;
+  workload: number;
+}
+export interface Suggestion extends Selection {
   reviewCount: number;
+  issueLoad?: number;
 }
 export type AssignmentStatus = "suggested" | "requested" | "already-requested";
 export type RunResult = Suggestion & { assigned: boolean };

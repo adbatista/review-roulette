@@ -7,6 +7,9 @@ const options: Options = {
   reviewers: ["Author", "Alice", "Bob"],
   organizations: [],
   assignReviewer: false,
+  issueRepositories: [],
+  statusField: "Status",
+  statusWeights: new Map(),
 };
 const target = { owner: "acme", repo: "project", pullNumber: 7 };
 function fixture(
@@ -17,6 +20,7 @@ function fixture(
     author?: string;
     counts?: Map<string, number>;
     suggested?: string[];
+    issueLoads?: Map<string, number>;
   } = {},
 ) {
   const events: string[] = [];
@@ -50,6 +54,10 @@ function fixture(
         ])
       );
     },
+    async getIssueLoads(scopes, _reviewers, field, weights) {
+      step(`issues:${scopes.join("+")}:${field}:${weights.size}`);
+      return settings.issueLoads ?? new Map();
+    },
     async listComments() {
       step("comments");
       return settings.comments ?? [];
@@ -71,16 +79,49 @@ function fixture(
 it("checks access first, excludes author before counting and creates suggestion without requesting", async () => {
   const f = fixture();
   const result = await run(options, target, f.api, () => 0);
-  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, assigned: false });
+  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, workload: 1, assigned: false });
   expect(f.events.slice(0, 3)).toEqual(["access", "pull", "counts"]);
   expect(f.counted).toEqual([["Alice", "Bob"]]);
   expect(f.events).not.toContain("request:Alice");
   expect(f.published[0]).toContain("Suggestion only");
 });
+it("skips issue lookups unless issue repositories are configured", async () => {
+  const f = fixture();
+  await run(options, target, f.api, () => 0);
+  expect(f.events.some((event) => event.startsWith("issues"))).toBe(false);
+});
+it("adds assigned issue load to review requests before selecting", async () => {
+  const f = fixture({
+    issueLoads: new Map([
+      ["alice", 5],
+      ["bob", 1],
+    ]),
+  });
+  const result = await run(
+    {
+      ...options,
+      issueRepositories: ["acme/tasks", "other"],
+      statusField: "Stage",
+      statusWeights: new Map([["done", 0]]),
+    },
+    target,
+    f.api,
+    () => 0,
+  );
+  expect(result).toEqual({
+    reviewer: "Bob",
+    reviewCount: 2,
+    issueLoad: 1,
+    workload: 3,
+    assigned: false,
+  });
+  expect(f.events).toContain("issues:acme/tasks+other:Stage:1");
+  expect(f.published[0]).toContain("2 pending review requests, assigned issue load 1");
+});
 it("balances native suggestions when no reviewer list is supplied", async () => {
   const f = fixture();
   const result = await run({ ...options, reviewers: [] }, target, f.api, () => 0);
-  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, assigned: false });
+  expect(result).toEqual({ reviewer: "Alice", reviewCount: 1, workload: 1, assigned: false });
   expect(f.counted).toEqual([["Alice", "Bob"]]);
   expect(f.events.slice(0, 4)).toEqual(["access", "pull", "suggestions", "counts"]);
 });
@@ -118,7 +159,7 @@ it("retains and updates an owned assigned suggestion even above minimum", async 
         id: 42,
         authorLogin: "bot",
         authorType: "Bot",
-        body: renderComment({ reviewer: "Bob", reviewCount: 0 }, "requested"),
+        body: renderComment({ reviewer: "Bob", reviewCount: 0, workload: 0 }, "requested"),
       },
     ],
   });

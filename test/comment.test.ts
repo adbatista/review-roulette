@@ -3,7 +3,7 @@ import { renderComment, readSuggestion, findManagedComment } from "../src/commen
 it.each(["suggested", "requested", "already-requested"] as const)(
   "renders one selection with truthful %s status",
   (status) => {
-    const body = renderComment({ reviewer: "Alice", reviewCount: 2 }, status);
+    const body = renderComment({ reviewer: "Alice", reviewCount: 2, workload: 2 }, status);
     expect(body).toContain("### Review roulette");
     expect(body).toContain("| Category | Suggested reviewer |");
     expect(body).toContain(
@@ -20,9 +20,14 @@ it.each(["suggested", "requested", "already-requested"] as const)(
   },
 );
 it("renders singular workload", () => {
-  expect(renderComment({ reviewer: "Bob", reviewCount: 1 }, "suggested")).toContain(
+  expect(renderComment({ reviewer: "Bob", reviewCount: 1, workload: 1 }, "suggested")).toContain(
     "1 pending review request |",
   );
+});
+it("adds the assigned issue load when issues are counted", () => {
+  expect(
+    renderComment({ reviewer: "Bob", reviewCount: 1, issueLoad: 4, workload: 5 }, "suggested"),
+  ).toContain("— 1 pending review request, assigned issue load 4 |");
 });
 it.each([
   "hello",
@@ -34,7 +39,7 @@ it.each([
   expect(readSuggestion(body)).toBeUndefined();
 });
 it("ignores copied markers and picks earliest owned valid comment", () => {
-  const body = renderComment({ reviewer: "Alice", reviewCount: 0 }, "suggested");
+  const body = renderComment({ reviewer: "Alice", reviewCount: 0, workload: 0 }, "suggested");
   const comments = [
     { id: 1, body, authorLogin: "mallory", authorType: "User" },
     { id: 5, body, authorLogin: "roulette[bot]", authorType: "Bot", appId: 10 },
@@ -48,7 +53,7 @@ it("supports authenticated user comments and rejects unmarked ones", () => {
     { id: 1, body: "unmarked", authorLogin: "Alice", authorType: "User" },
     {
       id: 2,
-      body: renderComment({ reviewer: "Bob", reviewCount: 0 }, "suggested"),
+      body: renderComment({ reviewer: "Bob", reviewCount: 0, workload: 0 }, "suggested"),
       authorLogin: "alice",
       authorType: "User",
     },

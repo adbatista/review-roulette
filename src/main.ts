@@ -1,6 +1,6 @@
 import * as core from "@actions/core";
 import { context } from "@actions/github";
-import { parseOptions, loginPattern } from "./inputs";
+import { parseOptions, loginPattern, repositoryPattern } from "./inputs";
 import { GitHubClient } from "./github";
 import { run } from "./run";
 import type { Target } from "./model";
@@ -14,7 +14,7 @@ function targetFromPayload(): Target {
     typeof owner !== "string" ||
     !loginPattern.test(owner) ||
     typeof repo !== "string" ||
-    !/^[\w.-]+$/.test(repo) ||
+    !repositoryPattern.test(repo) ||
     typeof pullNumber !== "number" ||
     !Number.isSafeInteger(pullNumber) ||
     pullNumber <= 0
@@ -34,11 +34,16 @@ export async function main(): Promise<void> {
       reviewers: core.getInput("reviewers"),
       organizations: core.getInput("organizations"),
       "assign-reviewer": core.getInput("assign-reviewer"),
+      "issue-repositories": core.getInput("issue-repositories"),
+      "status-field": core.getInput("status-field"),
+      "status-weights": core.getInput("status-weights"),
     });
     const target = targetFromPayload();
     const result = await run(options, target, new GitHubClient(token));
     core.setOutput("reviewer", result.reviewer);
     core.setOutput("review-count", result.reviewCount);
+    core.setOutput("issue-load", result.issueLoad ?? "");
+    core.setOutput("workload", result.workload);
     core.setOutput("assigned", result.assigned);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Review roulette failed";

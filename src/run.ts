@@ -1,6 +1,6 @@
 import { findManagedComment, readSuggestion, renderComment } from "./comment";
 import { selectReviewer } from "./selection";
-import type { AssignmentStatus, GitHubApi, Options, RunResult, Target } from "./model";
+import type { AssignmentStatus, GitHubApi, Options, RunResult, Suggestion, Target } from "./model";
 
 export async function run(
   options: Options,
@@ -8,7 +8,7 @@ export async function run(
   api: GitHubApi,
   random = Math.random,
 ): Promise<RunResult> {
-  const identity = await api.checkAccess(target, options.organizations);
+  const identity = await api.checkAccess(target, options.organizations, options.issueRepositories);
   const pull = await api.getPull(target);
   const reviewers = options.reviewers.length
     ? options.reviewers
@@ -17,17 +17,34 @@ export async function run(
   if (!eligible.length)
     throw new Error("No eligible reviewers remain after excluding the PR author");
   const counts = await api.getCounts(target, options.organizations, eligible);
+  const issueLoads = options.issueRepositories.length
+    ? await api.getIssueLoads(
+        options.issueRepositories,
+        eligible,
+        options.statusField,
+        options.statusWeights,
+      )
+    : undefined;
+  const workloads = new Map(
+    [...counts].map(([login, count]) => [login, count + (issueLoads?.get(login) ?? 0)]),
+  );
   const comment = findManagedComment(await api.listComments(target), identity);
-  const suggestion = selectReviewer(
+  const selection = selectReviewer(
     eligible,
     pull.author,
-    counts,
+    workloads,
     pull.requestedReviewers,
     comment ? readSuggestion(comment.body) : undefined,
     random,
   );
+  const login = selection.reviewer.toLowerCase();
+  const suggestion: Suggestion = {
+    ...selection,
+    reviewCount: counts.get(login)!,
+    ...(issueLoads ? { issueLoad: issueLoads.get(login)! } : {}),
+  };
   const alreadyRequested = pull.requestedReviewers.some(
-    (login) => login.toLowerCase() === suggestion.reviewer.toLowerCase(),
+    (requested) => requested.toLowerCase() === login,
   );
   let assigned = false;
   let status: AssignmentStatus = alreadyRequested ? "already-requested" : "suggested";

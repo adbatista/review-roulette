@@ -2,7 +2,7 @@
 
 A GitHub Action that picks the least-loaded reviewer from an explicit list or GitHub's native PR-specific suggestions, posts one managed pull-request comment, and optionally requests review.
 
-**Workload = outstanding personal review requests on open PRs**, not PR assignees or submitted reviews. The PR author is excluded. Minimum-count ties are random.
+**Workload = outstanding personal review requests on open PRs**, not PR assignees or submitted reviews. Optionally, open issues assigned to a reviewer in other repositories add to it, weighted by their project board status. The PR author is excluded. Minimum-count ties are random.
 
 ## Quick start
 
@@ -37,12 +37,15 @@ Both modes write a PR conversation comment and need `pull-requests: write`. Assi
 
 ## Inputs
 
-| Input             | Default               | Meaning                                                                                                 |
-| ----------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
-| `token`           | `${{ github.token }}` | Token used for all API operations.                                                                      |
-| `reviewers`       | Empty                 | Comma- or newline-separated user logins; optional leading `@`. Empty uses GitHub's suggested reviewers. |
-| `organizations`   | Empty                 | Organizations whose visible workloads are summed, **instead of** repository scope.                      |
-| `assign-reviewer` | `false`               | Set to `true` to request review as well as suggest it.                                                  |
+| Input                | Default               | Meaning                                                                                                 |
+| -------------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `token`              | `${{ github.token }}` | Token used for all API operations.                                                                      |
+| `reviewers`          | Empty                 | Comma- or newline-separated user logins; optional leading `@`. Empty uses GitHub's suggested reviewers. |
+| `organizations`      | Empty                 | Organizations whose visible workloads are summed, **instead of** repository scope.                      |
+| `assign-reviewer`    | `false`               | Set to `true` to request review as well as suggest it.                                                  |
+| `issue-repositories` | Empty                 | Owners or `owner/repo` names whose open issues assigned to a reviewer add to their workload.            |
+| `status-field`       | `Status`              | Single-select project field read as an issue's status.                                                  |
+| `status-weights`     | Empty                 | One `Status name: weight` per line. Empty counts every assigned issue as 1.                             |
 
 Lists are trimmed, validated, and deduplicated case-insensitively. Boolean inputs accept only `true` or `false`.
 
@@ -68,6 +71,32 @@ An explicit reviewer list takes precedence. In either mode, the action excludes 
 `GITHUB_TOKEN` is repository-scoped. Use a GitHub App installation token or PAT with access to the relevant repositories for broader counts. The token needs read access for PR workloads and write access to the target PR. Fine-grained tokens/App installations need repository **Pull requests: read** on workload repositories and **Pull requests: write** on the target; classic PATs need appropriate `repo` access for private repositories. The action resolves its authenticated comment identity through GraphQL `viewer`, including installation-token bot identities; it does not require installation tokens to support REST `/user`.
 
 Repository and organization lookups check scope accessibility, **not full private-repository visibility or write permission**. Organization counts reflect only repositories visible to the supplied token. A successful lookup cannot establish complete organization coverage. An inaccessible configured scope or failed/partial search fails the run instead of silently lowering a reviewer's workload.
+
+### Assigned issues and project status
+
+```yaml
+- uses: OWNER/review-roulette@<commit-sha>
+  with:
+    token: ${{ secrets.REVIEW_ROULETTE_TOKEN }}
+    reviewers: alice, bob, carol
+    issue-repositories: |
+      acme/tasks
+      acme-labs
+    status-weights: |
+      In progress: 3
+      Todo: 1
+      Done: 0
+      *: 1
+```
+
+Each candidate's workload becomes their pending review requests **plus** their issue load: the open issues assigned to them in the listed repositories (`owner/repo`) or across a whole owner (`owner`).
+
+- Without `status-weights`, every assigned open issue counts 1 and no project data is read.
+- With `status-weights`, each issue counts the weight of its status in the `status-field` of its GitHub Projects. Status names match case-insensitively and weights are non-negative integers.
+- `*` is the weight for an unlisted status and for issues on no project; it defaults to 1.
+- An issue on several projects counts once, at its heaviest status. Archived project items are ignored.
+
+Reading project status needs a token that can read the projects: a classic PAT with `read:project`, or a GitHub App with organization **Projects: read**. `GITHUB_TOKEN` cannot read organization projects or other repositories. A status that cannot be read fails the run instead of lowering the load.
 
 ## Fork pull requests
 
@@ -105,11 +134,13 @@ The comment shows only the selected reviewer:
 
 A status sentence says suggestion-only, review requested, or review already requested. The count is captured **before** a new request in that run.
 
-| Output         | Meaning                                                                           |
-| -------------- | --------------------------------------------------------------------------------- |
-| `reviewer`     | Selected login.                                                                   |
-| `review-count` | Outstanding request count at selection time.                                      |
-| `assigned`     | `true` only if this run successfully created a review request; otherwise `false`. |
+| Output         | Meaning                                                                                |
+| -------------- | -------------------------------------------------------------------------------------- |
+| `reviewer`     | Selected login.                                                                        |
+| `review-count` | Outstanding request count at selection time.                                           |
+| `issue-load`   | Weighted assigned issues of the selected reviewer; empty without `issue-repositories`. |
+| `workload`     | Request count plus issue load, the number used for selection.                          |
+| `assigned`     | `true` only if this run successfully created a review request; otherwise `false`.      |
 
 Outputs are published only after successful comment publication. API failures fail the action. If assignment succeeds but commenting fails, the request stays in place and the run fails; no rollback is attempted.
 
